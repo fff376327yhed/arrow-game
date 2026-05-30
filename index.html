@@ -30,6 +30,7 @@ let currentUser = null;
 let userNickname = '';
 
 /* ── 인증 상태 변경 ── */
+
 onAuthStateChanged(auth, async user => {
   currentUser = user;
   window._currentUid = user ? user.uid : null;
@@ -111,47 +112,140 @@ async function loadMyBest(uid) {
 }
 
 /* ── 기록 저장 (Firebase) ── */
+// ★ Apps Script 웹앱 URL을 여기에 입력하세요
+let GAS_URL = 'https://script.google.com/macros/s/AKfycbwGpysSOOaTWSXDUV9vqrueWnn42hByh5EHTANCZWTf5yDIa7BAUMnliJhLFlvHAcDs/exec';
+const GAS_SECRET = 'hsgcomet';
+
+window.getGasUrl = () => GAS_URL;
+window.setGasUrl = (url) => { GAS_URL = url; };
+
+async function sendToSheet({ uid, name, achievement, coins }) {
+  if (!GAS_URL) {
+    console.warn('[시트] GAS_URL 미설정 → 스킵');
+    return { ok: false, error: 'GAS_URL not set' };
+  }
+  console.log('[시트] 전송 시작 (JSONP):', achievement, coins);
+  return new Promise((resolve) => {
+    const cbName = '_gasCallback_' + Date.now() + '_' + Math.floor(Math.random()*10000);
+    const params = new URLSearchParams({ secret: GAS_SECRET, uid, name, achievement, coins, callback: cbName });
+    const url = `${GAS_URL}?${params}`;
+    const script = document.createElement('script');
+    const timer = setTimeout(() => {
+      cleanup();
+      console.warn('[시트] ⏱ 타임아웃 (10s)');
+      resolve({ ok: false, error: 'timeout' });
+    }, 10000);
+    function cleanup() {
+      clearTimeout(timer);
+      delete window[cbName];
+      if (script.parentNode) script.parentNode.removeChild(script);
+    }
+    window[cbName] = function(json) {
+      cleanup();
+      if (json && json.ok) {
+        console.log('[시트] ✅ 저장 성공:', json);
+      } else {
+        console.warn('[시트] ❌ 실패:', json && json.error);
+      }
+      resolve(json || { ok: false, error: 'empty response' });
+    };
+    script.src = url;
+    script.onerror = function() {
+      cleanup();
+      console.error('[시트] ❌ 스크립트 로드 에러');
+      resolve({ ok: false, error: 'script load error' });
+    };
+    document.head.appendChild(script);
+  });
+}
+
 window.fbSaveBest = async function(score, wave, acc, correct, attempts) {
-  if (!currentUser) return;
+  if (!currentUser) {
+    console.warn('[FB] 저장 스킵: 로그인 안 됨');
+    return;
+  }
   const uid  = currentUser.uid;
   const nick = userNickname || currentUser.displayName || '익명';
   const photo= currentUser.photoURL || '';
   const now  = Date.now();
 
-  // users/{uid}/best
-  const prevSnap = await get(ref(db, `users/${uid}/best`));
-  const prev = prevSnap.exists() ? prevSnap.val() : { score: 0, wave: 1 };
+  console.log(`━━━ 게임 종료 저장 시작 ━━━ score=${score} wave=${wave} acc=${acc}%`);
 
-  const newScore = Math.max(prev.score || 0, score);
-  const newWave  = Math.max(prev.wave  || 1, wave);
-  await set(ref(db, `users/${uid}/best`), {
-    score: newScore, wave: newWave,
-    nickname: nick, photoURL: photo,
-    lastPlayed: now
-  });
-
-  // rankings/score
-  if (score > (prev.score || 0)) {
-    await set(ref(db, `rankings/score/${uid}`), {
-      nickname: nick, photoURL: photo, score, wave, acc, ts: now
-    });
-  }
-  // rankings/wave
-  if (wave > (prev.wave || 1)) {
-    await set(ref(db, `rankings/wave/${uid}`), {
-      nickname: nick, photoURL: photo, wave, score, acc, ts: now
-    });
+  // ── STEP 1: 이전 기록 읽기 ──────────────────────────────
+  console.log('[1/4] Firebase 이전 기록 읽는 중...');
+  let prev = { score: 0, wave: 1 };
+  try {
+    const prevSnap = await get(ref(db, `users/${uid}/best`));
+    if (prevSnap.exists()) prev = prevSnap.val();
+    console.log(`[1/4] ✅ 이전 기록: score=${prev.score} wave=${prev.wave}`);
+  } catch(e) {
+    console.warn(`[1/4] ❌ 읽기 실패: ${e.message}`);
   }
 
-  // 도전과제: 50000점
+  const isNewScore = score > (prev.score || 0);
+  const isNewWave  = wave  > (prev.wave  || 1);
+  const newScore   = Math.max(prev.score || 0, score);
+  const newWave    = Math.max(prev.wave  || 1, wave);
+
+  // ── STEP 2: users/{uid}/best 저장 ───────────────────────
+  console.log('[2/4] Firebase users/best 저장 중...');
+  try {
+    await set(ref(db, `users/${uid}/best`), {
+      score: newScore, wave: newWave, nickname: nick, photoURL: photo, lastPlayed: now
+    });
+    console.log(`[2/4] ✅ best 저장 완료 — score=${newScore} wave=${newWave}`);
+  } catch(e) {
+    console.warn(`[2/4] ❌ best 저장 실패: ${e.message}`);
+  }
+
+  // ── STEP 2b: 랭킹 저장 (신기록일 때만) ─────────────────
+  if (isNewScore) {
+    console.log(`[2b] 점수 신기록 → rankings/score 저장`);
+    try {
+      await set(ref(db, `rankings/score/${uid}`), { nickname: nick, photoURL: photo, score, wave, acc, ts: now });
+      console.log(`[2b] ✅ 점수 랭킹 저장 완료`);
+    } catch(e) { console.warn(`[2b] ❌ 점수 랭킹 실패: ${e.message}`); }
+  } else {
+    console.log(`[2b] 점수 신기록 아님 (${score} ≤ ${prev.score}) → 랭킹 스킵`);
+  }
+  if (isNewWave) {
+    console.log(`[2b] 웨이브 신기록 → rankings/wave 저장`);
+    try {
+      await set(ref(db, `rankings/wave/${uid}`), { nickname: nick, photoURL: photo, wave, score, acc, ts: now });
+      console.log(`[2b] ✅ 웨이브 랭킹 저장 완료`);
+    } catch(e) { console.warn(`[2b] ❌ 웨이브 랭킹 실패: ${e.message}`); }
+  } else {
+    console.log(`[2b] 웨이브 신기록 아님 (${wave} ≤ ${prev.wave}) → 랭킹 스킵`);
+  }
+
+  // ── STEP 3: 도전과제 + 시트 저장 ────────────────────────
+  console.log('[3/4] 도전과제 체크 중...');
   if (score >= 50000) {
-    await set(ref(db, `achievements/${uid}/score50k`), {
-      nickname: nick, photoURL: photo, score, wave, acc,
-      correct, attempts, ts: now,
-      achieved: true
-    });
+    console.log(`[3/4] 🏆 50,000점 달성! Firebase achievements 저장 중...`);
+    try {
+      await set(ref(db, `achievements/${uid}/score50k`), {
+        nickname: nick, photoURL: photo, score, wave, acc, correct, attempts, ts: now, achieved: true
+      });
+      console.log(`[3/4] ✅ Firebase achievements 저장 완료`);
+    } catch(e) {
+      console.warn(`[3/4] ❌ achievements 저장 실패: ${e.message}`);
+    }
+
+    // 시트 전송 (도전과제 달성 행)
+    console.log('[3/4] 스프레드시트 전송 (achievement=score50k)...');
+    await sendToSheet({ uid, name: nick, achievement: 'score50k', coins: score });
+  } else {
+    console.log(`[3/4] 50,000점 미달 (${score}점) → 도전과제/시트 스킵`);
   }
+
+  // ── STEP 4: 일반 점수 시트 저장 (항상) ─────────────────
+  console.log('[4/4] 스프레드시트 일반 점수 전송 중...');
+  await sendToSheet({ uid, name: nick, achievement: 'coins_update', coins: score });
+
+  console.log(`━━━ 저장 완료 ━━━`);
 };
+
+window.sendToSheet = sendToSheet;
 
 /* ── 랭킹 불러오기 ── */
 window.loadRanking = async function(type) {
@@ -603,6 +697,7 @@ html, body {
   padding:4px 12px 4px 4px; cursor:pointer;
 }
 #userAvatar { width:24px; height:24px; border-radius:50%; object-fit:cover; }
+
 #userName { font-size:.72rem; font-weight:700; color:#f1f5f9; max-width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #userMenu {
   display:none; position:absolute; top:42px; left:0;
@@ -705,6 +800,7 @@ html, body {
 </style>
 </head>
 <body>
+
 
 <div id="flash"></div>
 <button class="mute-btn" id="muteBtn" onclick="toggleMute()">🔊</button>
@@ -2141,6 +2237,11 @@ async function loadAchieveUI() {
     progress.textContent = `현재 최고: ${(window.bestScore||0).toLocaleString()}점 (${pct}%)`;
   }
 }
+
+/* ════════════════════════════════
+   DEV CONSOLE
+════════════════════════════════ */
+
 
 document.addEventListener('keydown', e => {
   // Tutorial keyboard
