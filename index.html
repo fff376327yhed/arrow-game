@@ -1,0 +1,2171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arrow Rush</title>
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { getDatabase, ref, set, get, query, orderByChild, limitToLast }
+  from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDUgCpy3Sv8yby1A1KXA-mMo0GT2FjVSqU",
+  authDomain: "arrow-game-4b111.firebaseapp.com",
+  databaseURL: "https://arrow-game-4b111-default-rtdb.firebaseio.com",
+  projectId: "arrow-game-4b111",
+  storageBucket: "arrow-game-4b111.firebasestorage.app",
+  messagingSenderId: "769540246517",
+  appId: "1:769540246517:web:404dede6311c2353e82ebc",
+  measurementId: "G-JLSDFP4MPJ"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getDatabase(app);
+let currentUser = null;
+let userNickname = '';
+
+/* ── 인증 상태 변경 ── */
+onAuthStateChanged(auth, async user => {
+  currentUser = user;
+  window._currentUid = user ? user.uid : null;
+  if (user) {
+    // 닉네임 불러오기
+    const snap = await get(ref(db, `users/${user.uid}/nickname`));
+    userNickname = snap.exists() ? snap.val() : '';
+    updateAuthUI(user);
+    loadMyBest(user.uid);
+  } else {
+    updateAuthUI(null);
+  }
+});
+
+function updateAuthUI(user) {
+  const loginBtn  = document.getElementById('loginBtn');
+  const userInfo  = document.getElementById('userInfo');
+  const userAvatar= document.getElementById('userAvatar');
+  const userNameEl= document.getElementById('userName');
+  if (!loginBtn) return;
+  if (user) {
+    loginBtn.style.display = 'none';
+    userInfo.style.display = 'flex';
+    userAvatar.src = user.photoURL || '';
+    userNameEl.textContent = userNickname || user.displayName || '플레이어';
+  } else {
+    loginBtn.style.display = 'flex';
+    userInfo.style.display = 'none';
+  }
+  updateStartBest();
+}
+
+/* ── 구글 로그인 ── */
+window.googleLogin = async function() {
+  try {
+    const provider = new GoogleAuthProvider();
+    await signInWithPopup(auth, provider);
+  } catch(e) { console.error(e); }
+};
+
+window.googleLogout = async function() {
+  await signOut(auth);
+  window.bestScore = 0; window.bestWave = 1;
+  updateStartBest();
+};
+
+/* ── 닉네임 저장 ── */
+window.saveNickname = async function() {
+  if (!currentUser) return;
+  const input = document.getElementById('nicknameInput');
+  const val = input.value.trim().slice(0, 12);
+  if (!val) return;
+  userNickname = val;
+  await set(ref(db, `users/${currentUser.uid}/nickname`), val);
+  document.getElementById('nicknameModal').style.display = 'none';
+  document.getElementById('userName').textContent = val;
+  // 랭킹에도 닉네임 반영
+  await syncNicknameToRankings(val);
+};
+
+async function syncNicknameToRankings(nick) {
+  if (!currentUser) return;
+  const uid = currentUser.uid;
+  const scoreSnap = await get(ref(db, `rankings/score/${uid}`));
+  if (scoreSnap.exists()) await set(ref(db, `rankings/score/${uid}/nickname`), nick);
+  const waveSnap  = await get(ref(db, `rankings/wave/${uid}`));
+  if (waveSnap.exists())  await set(ref(db, `rankings/wave/${uid}/nickname`), nick);
+}
+
+/* ── 내 기록 불러오기 ── */
+async function loadMyBest(uid) {
+  const snap = await get(ref(db, `users/${uid}/best`));
+  if (snap.exists()) {
+    const d = snap.val();
+    window.bestScore = d.score || 0;
+    window.bestWave  = d.wave  || 1;
+    updateStartBest();
+  }
+}
+
+/* ── 기록 저장 (Firebase) ── */
+window.fbSaveBest = async function(score, wave, acc, correct, attempts) {
+  if (!currentUser) return;
+  const uid  = currentUser.uid;
+  const nick = userNickname || currentUser.displayName || '익명';
+  const photo= currentUser.photoURL || '';
+  const now  = Date.now();
+
+  // users/{uid}/best
+  const prevSnap = await get(ref(db, `users/${uid}/best`));
+  const prev = prevSnap.exists() ? prevSnap.val() : { score: 0, wave: 1 };
+
+  const newScore = Math.max(prev.score || 0, score);
+  const newWave  = Math.max(prev.wave  || 1, wave);
+  await set(ref(db, `users/${uid}/best`), {
+    score: newScore, wave: newWave,
+    nickname: nick, photoURL: photo,
+    lastPlayed: now
+  });
+
+  // rankings/score
+  if (score > (prev.score || 0)) {
+    await set(ref(db, `rankings/score/${uid}`), {
+      nickname: nick, photoURL: photo, score, wave, acc, ts: now
+    });
+  }
+  // rankings/wave
+  if (wave > (prev.wave || 1)) {
+    await set(ref(db, `rankings/wave/${uid}`), {
+      nickname: nick, photoURL: photo, wave, score, acc, ts: now
+    });
+  }
+
+  // 도전과제: 50000점
+  if (score >= 50000) {
+    await set(ref(db, `achievements/${uid}/score50k`), {
+      nickname: nick, photoURL: photo, score, wave, acc,
+      correct, attempts, ts: now,
+      achieved: true
+    });
+  }
+};
+
+/* ── 랭킹 불러오기 ── */
+window.loadRanking = async function(type) {
+  const q = query(ref(db, `rankings/${type}`), orderByChild(type), limitToLast(50));
+  const snap = await get(q);
+  const rows = [];
+  snap.forEach(child => rows.push({ uid: child.key, ...child.val() }));
+  // 내림차순
+  rows.sort((a,b) => type === 'score' ? b.score - a.score : b.wave - a.wave);
+  return rows;
+};
+</script>
+<style>
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+
+html, body {
+  width:100%; height:100%;
+  background:#000;
+  font-family:'Segoe UI', system-ui, sans-serif;
+  overflow:hidden;
+  user-select:none;
+  -webkit-tap-highlight-color:transparent;
+}
+
+.screen { display:none; width:100%; height:100%; }
+.screen.active { display:flex; }
+
+/* ══════════════════════════════
+   START SCREEN
+══════════════════════════════ */
+#startScreen {
+  flex-direction:column; align-items:center; justify-content:center;
+  background: radial-gradient(ellipse at 30% 40%, #1e1040 0%, #000 55%),
+              radial-gradient(ellipse at 70% 65%, #001a10 0%, transparent 55%);
+  padding:24px; gap:0;
+}
+.start-logo {
+  font-size:clamp(2.6rem,8vw,4.5rem); font-weight:900; letter-spacing:6px;
+  background:linear-gradient(135deg,#a78bfa,#34d399);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  margin-bottom:4px; text-align:center; line-height:1.1;
+}
+.start-sub { font-size:.8rem; color:#475569; letter-spacing:3px; margin-bottom:40px; }
+
+.start-btns { display:flex; flex-direction:column; gap:14px; align-items:center; }
+
+.btn-primary {
+  background:linear-gradient(135deg,#7c3aed,#059669);
+  border:none; color:#fff; font-size:1rem; font-weight:800;
+  padding:16px 56px; border-radius:100px; cursor:pointer; letter-spacing:3px;
+  box-shadow:0 0 36px rgba(124,58,237,.4);
+  transition:transform .15s, box-shadow .15s; width:220px; text-align:center;
+}
+.btn-primary:hover { transform:scale(1.05); }
+
+.btn-secondary {
+  background:transparent; border:1px solid #1e293b; color:#64748b;
+  font-size:.88rem; font-weight:600; padding:12px 40px; border-radius:100px;
+  cursor:pointer; letter-spacing:2px; transition:border-color .15s, color .15s; width:220px; text-align:center;
+}
+.btn-secondary:hover { border-color:#334155; color:#94a3b8; }
+
+/* ══════════════════════════════
+   TUTORIAL SCREEN
+══════════════════════════════ */
+#tutorialScreen {
+  flex-direction:column; align-items:center; justify-content:flex-start;
+  background:#000; overflow:hidden;
+}
+
+.tut-header {
+  width:100%; max-width:480px; padding:28px 24px 0;
+  display:flex; align-items:center; gap:12px;
+}
+.tut-back {
+  background:none; border:1px solid #1e293b; color:#64748b;
+  border-radius:50%; width:36px; height:36px; cursor:pointer;
+  font-size:1rem; display:flex; align-items:center; justify-content:center;
+  flex-shrink:0; transition:border-color .15s; line-height:1;
+}
+.tut-back:hover { border-color:#334155; }
+.tut-title {
+  font-size:1.1rem; font-weight:800; letter-spacing:3px;
+  color:#f1f5f9; text-transform:uppercase;
+}
+
+.tut-body { width:100%; max-width:480px; padding:24px 24px 0; display:flex; flex-direction:column; gap:16px; }
+
+/* Tutorial card */
+.tut-card {
+  border-radius:20px; overflow:hidden;
+  border:1px solid #1e293b;
+}
+.tut-card-header {
+  padding:14px 20px; display:flex; align-items:center; gap:12px;
+}
+.tut-card-body {
+  padding:14px 20px 18px; background:#080810;
+  font-size:.85rem; color:#94a3b8; line-height:1.7;
+}
+.tut-card-body b { color:#e2e8f0; }
+
+/* Pattern colour headers */
+.tc-white  { background:#0f172a; }
+.tc-yellow { background:linear-gradient(135deg,#451a03,#78350f); }
+.tc-red    { background:linear-gradient(135deg,#450a0a,#7f1d1d); }
+.tc-blue   { background:linear-gradient(135deg,#0c1a4a,#1e3a8a); }
+.tc-purple { background:linear-gradient(135deg,#1e0a3a,#4c1d95); }
+
+.tc-body-white  { border-top:1px solid #1e293b; }
+.tc-body-yellow { border-top:1px solid #78350f66; }
+.tc-body-red    { border-top:1px solid #7f1d1d66; }
+.tc-body-blue   { border-top:1px solid #1e3a8a66; }
+.tc-body-purple { border-top:1px solid #4c1d9566; }
+
+.tut-pat-icon {
+  width:44px; height:44px; border-radius:12px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:1.3rem; flex-shrink:0;
+}
+.tpi-white  { background:#1e293b; }
+.tpi-yellow { background:#92400e; }
+.tpi-red    { background:#7f1d1d; }
+.tpi-blue   { background:#1e3a8a; }
+.tpi-purple { background:#4c1d95; }
+
+.tut-pat-info { flex:1; }
+.tut-pat-name { font-size:.95rem; font-weight:800; letter-spacing:1px; }
+.tn-white  { color:#94a3b8; }
+.tn-yellow { color:#fde68a; }
+.tn-red    { color:#fca5a5; }
+.tn-blue   { color:#93c5fd; }
+.tn-purple { color:#c4b5fd; }
+.tut-pat-wave { font-size:.68rem; letter-spacing:2px; color:#475569; text-transform:uppercase; margin-top:2px; }
+
+/* Demo panels inside tutorial card */
+.tut-demo {
+  display:flex; height:72px; border-radius:10px; overflow:hidden; margin-top:10px;
+  border:1px solid #1e293b;
+}
+.tut-demo-panel {
+  flex:1; display:flex; align-items:center; justify-content:center;
+  font-size:1.6rem; opacity:.7;
+}
+.tdp-left  { background:#0d0d1a; border-right:1px solid #1e293b; }
+.tdp-right { background:#0d1a0d; }
+.tdp-highlight-left  { background:#1e0a40; border-right:1px solid #7c3aed44; }
+.tdp-highlight-right { background:#0a2218; }
+.tdp-highlight-right2 { background:#0a2218; border:2px solid #059669; }
+.tdp-danger { background:#2d0505; }
+.tdp-neutral { background:#0d0d1a; opacity:.4; }
+
+.tut-arrow-preview {
+  display:flex; align-items:center; justify-content:center;
+  font-size:2.2rem; margin:6px 0; height:56px;
+}
+/* colour tinted arrows */
+.tap-white  { filter:none; }
+.tap-yellow { filter:drop-shadow(0 0 8px #fbbf24); }
+.tap-red    { filter:drop-shadow(0 0 8px #f87171); }
+.tap-blue   { filter:drop-shadow(0 0 8px #60a5fa); }
+.tap-purple { filter:drop-shadow(0 0 8px #c084fc); }
+
+.tut-tip {
+  display:flex; gap:8px; margin-top:8px; align-items:flex-start;
+  background:#0f172a; border-radius:10px; padding:10px 14px;
+  font-size:.8rem; color:#64748b; line-height:1.6;
+}
+.tut-tip-icon { font-size:1rem; flex-shrink:0; }
+
+/* Score multiplier badge */
+.mult-badge {
+  display:inline-block; font-size:.7rem; font-weight:800; letter-spacing:1px;
+  padding:2px 8px; border-radius:100px; margin-left:6px;
+}
+.mb-yellow { background:#78350f; color:#fde68a; }
+.mb-blue   { background:#1e3a8a; color:#93c5fd; }
+.mb-purple { background:#4c1d95; color:#c4b5fd; }
+
+.tut-start-btn {
+  margin:24px 24px 0;
+  background:linear-gradient(135deg,#7c3aed,#059669);
+  border:none; color:#fff; font-size:1rem; font-weight:800;
+  padding:16px; border-radius:16px; cursor:pointer; letter-spacing:3px;
+  box-shadow:0 0 28px rgba(124,58,237,.35); width:calc(100% - 48px); max-width:432px;
+  transition:transform .15s;
+}
+.tut-start-btn:hover { transform:scale(1.02); }
+
+/* Practice button inside tutorial card header */
+.tut-practice-btn {
+  margin-left:auto; background:rgba(124,58,237,.18);
+  border:1px solid #7c3aed55; color:#a78bfa;
+  font-size:.72rem; font-weight:700; letter-spacing:1.5px;
+  padding:6px 14px; border-radius:100px; cursor:pointer;
+  transition:background .15s, border-color .15s; white-space:nowrap; flex-shrink:0;
+}
+.tut-practice-btn:hover { background:rgba(124,58,237,.32); border-color:#7c3aed; }
+
+/* ══════════════════════════════
+   GAME SCREEN
+══════════════════════════════ */
+#gameScreen { flex-direction:column; position:relative; }
+
+/* HUD */
+.hud {
+  position:absolute; top:0; left:0; right:0; height:54px;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:0 16px; background:rgba(0,0,0,.75);
+  backdrop-filter:blur(8px); z-index:10; border-bottom:1px solid #0f172a;
+}
+.hud-block { text-align:center; min-width:64px; }
+.hud-label { font-size:.55rem; letter-spacing:2px; color:#475569; text-transform:uppercase; }
+.hud-value { font-size:1.1rem; font-weight:800; color:#f1f5f9; line-height:1.2; }
+.hud-value.purple { color:#a78bfa; }
+.hud-value.green  { color:#34d399; }
+.lives-row { display:flex; gap:3px; justify-content:center; margin-top:1px; }
+.heart { font-size:.9rem; transition:filter .2s, opacity .2s; }
+.heart.dead { filter:grayscale(1); opacity:.2; }
+
+/* Timer */
+.timer-bar-wrap { position:absolute; top:54px; left:0; right:0; height:6px; background:#0f172a; z-index:10; }
+.timer-bar { height:100%; background:linear-gradient(90deg,#7c3aed,#34d399); transition:width .05s linear, background .3s; }
+.timer-bar.danger { background:linear-gradient(90deg,#b91c1c,#f59e0b); }
+
+/* Panels */
+.panels { display:flex; flex:1; margin-top:60px; transition:flex-direction .0s; }
+.panel {
+  flex:1; display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  cursor:pointer; position:relative; overflow:hidden;
+  transition:background .18s;
+}
+/* Default panel colours */
+.panel-left  { background:#0d0d1a; border-right:2px solid #0f172a; }
+.panel-right { background:#0d1a0d; border-left: 2px solid #0f172a; }
+
+/* SWAPPED layout (orange): panels visually flipped */
+.panels.swapped .panel-left  { order:2; border-right:none; border-left:2px solid #0f172a; }
+.panels.swapped .panel-right { order:1; border-left:none; border-right:2px solid #0f172a; }
+
+/* VERTICAL layout (green): panels stacked top/bottom */
+.panels.vertical { flex-direction:column; }
+.panels.vertical .panel-left  {
+  border-right:none; border-bottom:2px solid #0f172a; border-left:none;
+  background:#0d0d1a;
+}
+.panels.vertical .panel-right {
+  border-left:none; border-top:2px solid #0f172a; border-right:none;
+  background:#0d1a0d;
+}
+/* Vertical: relabel arrows */
+.panels.vertical .panel-left  .panel-label { color:#a78bfa; }
+.panels.vertical .panel-right .panel-label { color:#34d399; }
+
+/* Panel indicator badge (shows UP/DOWN or SWAPPED hint) */
+.panel-mod-badge {
+  position:absolute; top:8px; left:50%; transform:translateX(-50%);
+  font-size:.6rem; letter-spacing:2px; color:#fff; font-weight:800;
+  padding:2px 10px; border-radius:100px; text-transform:uppercase; white-space:nowrap;
+  pointer-events:none; opacity:.7;
+}
+.panel-mod-badge.orange-badge { background:rgba(234,88,12,.55); border:1px solid #ea580c88; }
+.panel-mod-badge.green-badge  { background:rgba(5,150,105,.45); border:1px solid #05966988; }
+
+/* Panel backgrounds stay constant regardless of pattern — only arrow card changes */
+
+/* Hit/miss override */
+.panel-left.hit   { background:#18092e !important; }
+.panel-right.hit  { background:#082218 !important; }
+.panel-left.miss, .panel-right.miss { background:#1a0505 !important; }
+
+/* Ripple */
+.panel::after {
+  content:''; position:absolute; inset:0; pointer-events:none;
+  background:radial-gradient(circle at var(--rx,50%) var(--ry,50%),
+    rgba(255,255,255,.14) 0%, transparent 60%);
+  opacity:0; transition:opacity .28s;
+}
+.panel.ripple::after { opacity:1; }
+
+.panel-label {
+  font-size:clamp(.9rem,2.5vw,1.3rem); font-weight:700;
+  letter-spacing:4px; text-transform:uppercase;
+  margin-bottom:16px; opacity:.22; transition:opacity .2s;
+}
+.panel-left  .panel-label { color:#a78bfa; }
+.panel-right .panel-label { color:#34d399; }
+.panel-icon {
+  font-size:clamp(3.5rem,10vw,7rem); opacity:.07;
+  transition:opacity .2s, transform .15s; pointer-events:none;
+}
+.panel-left  .panel-icon { color:#7c3aed; }
+.panel-right .panel-icon { color:#059669; }
+.panel:hover .panel-label { opacity:.45; }
+.panel:hover .panel-icon  { opacity:.12; transform:scale(1.05); }
+.panel.hit .panel-label   { opacity:.85; }
+.panel.hit .panel-icon    { opacity:.45; transform:scale(1.1); }
+
+/* Centre zone */
+.center-zone {
+  position:absolute; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  display:flex; flex-direction:column; align-items:center; gap:10px;
+  pointer-events:none; z-index:5;
+}
+.wave-chip {
+  background:rgba(10,10,20,.85); border:1px solid #1e293b;
+  border-radius:100px; padding:4px 16px;
+  font-size:.68rem; letter-spacing:3px; color:#475569; text-transform:uppercase;
+}
+.wave-chip span { color:#60a5fa; font-weight:700; }
+
+/* Arrow card — colour comes from border only, bg stays dark */
+.arrow-card {
+  background:rgba(10,10,20,.9);
+  border:3px solid #1e293b;
+  border-radius:22px; padding:14px 20px;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+  backdrop-filter:blur(10px);
+  box-shadow:0 8px 40px rgba(0,0,0,.7);
+  transition:box-shadow .15s, transform .12s, border-color .2s;
+  min-width:110px; min-height:110px;
+}
+/* Pattern border colours — only border changes, no hint text */
+.arrow-card.pat-white  { border-color:#334155; }
+.arrow-card.pat-yellow { border-color:#ca8a04; box-shadow:0 0 28px rgba(202,138,4,.35); }
+.arrow-card.pat-red    { border-color:#dc2626; box-shadow:0 0 28px rgba(220,38,38,.35); }
+.arrow-card.pat-blue   { border-color:#2563eb; box-shadow:0 0 28px rgba(37,99,235,.4); }
+.arrow-card.pat-purple { border-color:#9333ea; box-shadow:0 0 28px rgba(147,51,234,.45); }
+.arrow-card.pat-orange { border-color:#ea580c; box-shadow:0 0 28px rgba(234,88,12,.45); }
+.arrow-card.pat-green  { border-color:#059669; box-shadow:0 0 28px rgba(5,150,105,.45); }
+
+/* Feedback states */
+.arrow-card.ac-correct-left  { border-color:#7c3aed; box-shadow:0 0 44px rgba(124,58,237,.65); transform:scale(1.07); }
+.arrow-card.ac-correct-right { border-color:#059669; box-shadow:0 0 44px rgba(5,150,105,.65);  transform:scale(1.07); }
+.arrow-card.ac-wrong  { border-color:#dc2626; box-shadow:0 0 44px rgba(220,38,38,.65); transform:scale(.92); }
+.arrow-card.ac-skip   { border-color:#22c55e; box-shadow:0 0 44px rgba(34,197,94,.6);  transform:scale(1.05); }
+
+.arrow-sym {
+  font-size:clamp(3rem,9vw,5.5rem); line-height:1;
+}
+/* Arrow colour tinting per pattern */
+.arrow-card.pat-yellow .arrow-sym { filter:drop-shadow(0 0 10px #fbbf2488); }
+.arrow-card.pat-red    .arrow-sym { filter:drop-shadow(0 0 10px #f8717188); }
+.arrow-card.pat-blue   .arrow-sym { filter:drop-shadow(0 0 10px #60a5fa88); }
+.arrow-card.pat-purple .arrow-sym { filter:drop-shadow(0 0 10px #c084fc88); }
+.arrow-card.pat-orange .arrow-sym { filter:drop-shadow(0 0 10px #fb923c88); }
+.arrow-card.pat-green  .arrow-sym { filter:drop-shadow(0 0 10px #34d39988); }
+
+/* Tap progress — hidden (dots removed) */
+
+/* RED countdown number inside card */
+.red-num {
+  font-size:1.6rem; font-weight:900; color:#f87171;
+  animation:redpulse 1s linear infinite; margin-top:6px;
+}
+@keyframes redpulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+/* Toast */
+.toast {
+  position:absolute; bottom:9%; left:50%; transform:translateX(-50%);
+  background:rgba(10,10,20,.92); border:1px solid #1e293b; border-radius:100px;
+  padding:7px 22px; font-size:.82rem; font-weight:700; letter-spacing:1px;
+  pointer-events:none; z-index:20; opacity:0; transition:opacity .18s; white-space:nowrap;
+}
+.toast.show { opacity:1; }
+.toast.ok      { color:#34d399; border-color:#065f46; }
+.toast.bad     { color:#f87171; border-color:#7f1d1d; }
+.toast.timeout { color:#fbbf24; border-color:#78350f; }
+.toast.skip    { color:#4ade80; border-color:#166534; }
+
+/* Floater */
+.floater {
+  position:fixed; font-size:1.4rem; font-weight:900;
+  pointer-events:none; z-index:200; animation:rise .75s ease-out forwards;
+}
+@keyframes rise {
+  0%  { opacity:1; transform:translateY(0) scale(1); }
+  100%{ opacity:0; transform:translateY(-68px) scale(1.3); }
+}
+
+/* Flash */
+#flash { position:fixed; inset:0; pointer-events:none; z-index:300; opacity:0; transition:opacity .12s; }
+#flash.g { background:rgba(52,211,153,.1);  opacity:1; }
+#flash.r { background:rgba(220,38,38,.18);  opacity:1; }
+
+/* ══════════════════════════════
+   RESULT SCREEN
+══════════════════════════════ */
+#resultScreen {
+  flex-direction:column; align-items:center; justify-content:center;
+  background:radial-gradient(ellipse at center,#0f0520 0%,#000 70%); padding:24px;
+}
+#resultScreen h2 {
+  font-size:clamp(2rem,7vw,3.6rem); font-weight:900; letter-spacing:6px;
+  background:linear-gradient(135deg,#f87171,#f59e0b);
+  -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin-bottom:4px;
+}
+.result-sub { color:#334155; font-size:.75rem; letter-spacing:3px; margin-bottom:28px; }
+.result-grid {
+  display:grid; grid-template-columns:1fr 1fr; gap:10px;
+  width:min(320px,85%); margin-bottom:28px;
+}
+.r-card { background:#0f172a; border:1px solid #1e293b; border-radius:14px; padding:16px; text-align:center; }
+.r-label { font-size:.62rem; letter-spacing:2px; color:#475569; text-transform:uppercase; margin-bottom:5px; }
+.r-val   { font-size:1.8rem; font-weight:800; }
+.r-card.c1 .r-val { color:#a78bfa; }
+.r-card.c2 .r-val { color:#60a5fa; }
+.r-card.c3 .r-val { color:#34d399; }
+.r-card.c4 .r-val { color:#f59e0b; }
+.new-rec { color:#fbbf24; font-size:.75rem; font-weight:700; letter-spacing:3px; text-transform:uppercase; margin-bottom:16px; animation:blink 1s infinite; }
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+.btn-retry {
+  background:linear-gradient(135deg,#7c3aed,#059669); border:none; color:#fff;
+  font-size:.95rem; font-weight:800; padding:13px 40px; border-radius:100px;
+  cursor:pointer; letter-spacing:3px; box-shadow:0 0 28px rgba(124,58,237,.35);
+  transition:transform .15s; margin-bottom:10px;
+}
+.btn-retry:hover { transform:scale(1.05); }
+.btn-home { background:none; border:none; color:#334155; cursor:pointer; font-size:.78rem; padding:8px; }
+.btn-home:hover { color:#64748b; }
+
+/* Mute */
+.mute-btn {
+  position:fixed; top:10px; right:10px; z-index:400;
+  background:rgba(15,23,42,.85); border:1px solid #1e293b; border-radius:50%;
+  width:34px; height:34px; cursor:pointer; font-size:.9rem;
+  display:flex; align-items:center; justify-content:center; color:#fff; transition:background .15s;
+}
+.mute-btn:hover { background:#1e293b; }
+
+/* ══ AUTH UI ══ */
+#authWidget {
+  position:fixed; top:10px; left:10px; z-index:400;
+  display:flex; align-items:center; gap:8px;
+}
+#loginBtn {
+  background:rgba(15,23,42,.85); border:1px solid #1e293b; border-radius:100px;
+  color:#94a3b8; font-size:.72rem; font-weight:700; letter-spacing:1px;
+  padding:6px 14px; cursor:pointer; display:flex; align-items:center; gap:6px;
+  transition:border-color .15s;
+}
+#loginBtn:hover { border-color:#334155; color:#f1f5f9; }
+#userInfo {
+  display:none; align-items:center; gap:8px;
+  background:rgba(15,23,42,.85); border:1px solid #1e293b; border-radius:100px;
+  padding:4px 12px 4px 4px; cursor:pointer;
+}
+#userAvatar { width:24px; height:24px; border-radius:50%; object-fit:cover; }
+#userName { font-size:.72rem; font-weight:700; color:#f1f5f9; max-width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#userMenu {
+  display:none; position:absolute; top:42px; left:0;
+  background:#0f172a; border:1px solid #1e293b; border-radius:12px;
+  padding:6px; min-width:140px; z-index:500;
+}
+#userMenu button {
+  width:100%; text-align:left; background:none; border:none;
+  color:#94a3b8; font-size:.8rem; padding:8px 12px; cursor:pointer;
+  border-radius:8px; transition:background .12s;
+}
+#userMenu button:hover { background:#1e293b; color:#f1f5f9; }
+
+/* ══ NICKNAME MODAL ══ */
+#nicknameModal {
+  display:none; position:fixed; inset:0; z-index:600;
+  background:rgba(0,0,0,.7); align-items:center; justify-content:center;
+}
+.nick-box {
+  background:#0f172a; border:1px solid #1e293b; border-radius:20px;
+  padding:28px 24px; width:min(320px,90vw); display:flex; flex-direction:column; gap:16px;
+}
+.nick-box h3 { font-size:1rem; font-weight:800; color:#f1f5f9; letter-spacing:2px; }
+.nick-box input {
+  background:#000; border:1px solid #1e293b; border-radius:10px;
+  color:#f1f5f9; font-size:.95rem; padding:10px 14px; outline:none;
+  transition:border-color .15s;
+}
+.nick-box input:focus { border-color:#7c3aed; }
+.nick-box-btns { display:flex; gap:8px; }
+.nick-box-btns button { flex:1; border:none; border-radius:10px; padding:10px; cursor:pointer; font-weight:700; font-size:.85rem; }
+.nick-save { background:linear-gradient(135deg,#7c3aed,#059669); color:#fff; }
+.nick-cancel { background:#1e293b; color:#94a3b8; }
+
+/* ══ TAB NAV (Start Screen) ══ */
+.main-tabs {
+  display:flex; gap:0; border:1px solid #1e293b; border-radius:12px;
+  overflow:hidden; margin-bottom:20px; width:min(320px,90vw);
+}
+.main-tab {
+  flex:1; background:transparent; border:none; color:#475569;
+  font-size:.7rem; font-weight:700; letter-spacing:1.5px; padding:10px 4px;
+  cursor:pointer; transition:background .15s, color .15s; text-transform:uppercase;
+}
+.main-tab.active { background:#0f172a; color:#f1f5f9; }
+
+/* ══ RANKING SCREEN ══ */
+#rankingPane {
+  display:none; flex-direction:column; width:100%; max-width:480px;
+  margin:0 auto; padding:0 20px 40px; gap:12px;
+}
+.rank-tabs {
+  display:flex; gap:8px; margin-bottom:4px;
+}
+.rank-tab {
+  flex:1; background:#0f172a; border:1px solid #1e293b; border-radius:10px;
+  color:#475569; font-size:.75rem; font-weight:700; padding:10px;
+  cursor:pointer; transition:all .15s; letter-spacing:1px;
+}
+.rank-tab.active { border-color:#7c3aed; color:#a78bfa; background:#1a0a3a; }
+.rank-list { display:flex; flex-direction:column; gap:8px; }
+.rank-row {
+  display:flex; align-items:center; gap:12px;
+  background:#080810; border:1px solid #1e293b; border-radius:12px; padding:10px 14px;
+}
+.rank-num { font-size:.85rem; font-weight:900; color:#334155; width:20px; text-align:center; flex-shrink:0; }
+.rank-num.top1 { color:#fbbf24; }
+.rank-num.top2 { color:#94a3b8; }
+.rank-num.top3 { color:#b45309; }
+.rank-avatar { width:32px; height:32px; border-radius:50%; object-fit:cover; background:#1e293b; flex-shrink:0; }
+.rank-info { flex:1; min-width:0; }
+.rank-name { font-size:.85rem; font-weight:800; color:#f1f5f9; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rank-sub  { font-size:.68rem; color:#475569; }
+.rank-val  { font-size:1.1rem; font-weight:900; color:#a78bfa; flex-shrink:0; }
+.rank-val.wave-val { color:#34d399; }
+.rank-me { border-color:#7c3aed44; background:#0d0a1a; }
+.rank-loading { text-align:center; color:#334155; font-size:.8rem; padding:24px; }
+
+/* ══ ACHIEVEMENT SCREEN ══ */
+#achievePane {
+  display:none; flex-direction:column; width:100%; max-width:480px;
+  margin:0 auto; padding:0 20px 40px; gap:12px;
+}
+.ach-card {
+  background:#080810; border:1px solid #1e293b; border-radius:16px;
+  padding:16px 18px; display:flex; align-items:center; gap:14px;
+}
+.ach-icon { font-size:2rem; flex-shrink:0; }
+.ach-info { flex:1; }
+.ach-name { font-size:.9rem; font-weight:800; color:#f1f5f9; }
+.ach-desc { font-size:.75rem; color:#475569; margin-top:2px; line-height:1.5; }
+.ach-badge {
+  font-size:.65rem; font-weight:700; padding:3px 10px; border-radius:100px;
+  flex-shrink:0; white-space:nowrap;
+}
+.ach-done { background:#14532d; color:#4ade80; border:1px solid #166534; }
+.ach-lock { background:#1e293b; color:#475569; border:1px solid #334155; }
+.ach-progress { font-size:.7rem; color:#60a5fa; margin-top:4px; }
+
+</style>
+</head>
+<body>
+
+<div id="flash"></div>
+<button class="mute-btn" id="muteBtn" onclick="toggleMute()">🔊</button>
+
+<!-- ══ AUTH WIDGET ══ -->
+<div id="authWidget">
+  <button id="loginBtn" onclick="googleLogin()">
+    <svg width="14" height="14" viewBox="0 0 18 18"><path fill="#4285F4" d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.716v2.259h2.908c1.702-1.567 2.684-3.875 2.684-6.615z"/><path fill="#34A853" d="M9 18c2.43 0 4.467-.806 5.956-2.18l-2.908-2.259c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332A8.997 8.997 0 0 0 9 18z"/><path fill="#FBBC05" d="M3.964 10.71A5.41 5.41 0 0 1 3.682 9c0-.593.102-1.17.282-1.71V4.958H.957A8.996 8.996 0 0 0 0 9c0 1.452.348 2.827.957 4.042l3.007-2.332z"/><path fill="#EA4335" d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0A8.997 8.997 0 0 0 .957 4.958L3.964 7.29C4.672 5.163 6.656 3.58 9 3.58z"/></svg>
+    Google 로그인
+  </button>
+  <div id="userInfo" style="position:relative;" onclick="toggleUserMenu()">
+    <img id="userAvatar" src="" alt="">
+    <span id="userName"></span>
+    <div id="userMenu">
+      <button onclick="openNicknameModal(); event.stopPropagation();">✏️ 닉네임 변경</button>
+      <button onclick="googleLogout(); event.stopPropagation();">🚪 로그아웃</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ NICKNAME MODAL ══ -->
+<div id="nicknameModal" style="display:none;position:fixed;inset:0;z-index:600;background:rgba(0,0,0,.7);display:none;align-items:center;justify-content:center;">
+  <div class="nick-box">
+    <h3>닉네임 설정</h3>
+    <input id="nicknameInput" type="text" maxlength="12" placeholder="최대 12자" onkeydown="if(event.key==='Enter')saveNickname()">
+    <div class="nick-box-btns">
+      <button class="nick-save" onclick="saveNickname()">저장</button>
+      <button class="nick-cancel" onclick="document.getElementById('nicknameModal').style.display='none'">취소</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══ START ══ -->
+<div id="startScreen" class="screen active">
+  <div class="start-logo">ARROW<br>RUSH</div>
+  <div class="start-sub">PATTERN EDITION</div>
+  <div id="startBestDisplay" style="margin-bottom:16px;text-align:center;min-height:36px;"></div>
+
+  <!-- Main tab nav -->
+  <div class="main-tabs">
+    <button class="main-tab active" onclick="switchMainTab('play')" id="tabPlay">▶ PLAY</button>
+    <button class="main-tab" onclick="switchMainTab('ranking')" id="tabRanking">🏆 랭킹</button>
+    <button class="main-tab" onclick="switchMainTab('achieve')" id="tabAchieve">🎯 도전과제</button>
+  </div>
+
+  <!-- PLAY pane -->
+  <div id="playPane" style="display:flex;flex-direction:column;align-items:center;gap:14px;width:100%;max-width:480px;">
+    <div class="start-btns">
+      <button class="btn-primary" onclick="startGame()">▶ START</button>
+      <button class="btn-secondary" onclick="startTutorial()">📖 튜토리얼</button>
+    </div>
+  </div>
+
+  <!-- RANKING pane -->
+  <div id="rankingPane" style="display:none;flex-direction:column;width:100%;max-width:480px;padding:0 20px 40px;gap:12px;overflow-y:auto;max-height:60vh;">
+    <div class="rank-tabs">
+      <button class="rank-tab active" id="rankTabScore" onclick="switchRankTab('score')">🏅 점수 부문</button>
+      <button class="rank-tab" id="rankTabWave" onclick="switchRankTab('wave')">🌊 웨이브 부문</button>
+    </div>
+    <div class="rank-list" id="rankList"><div class="rank-loading">불러오는 중...</div></div>
+  </div>
+
+  <!-- ACHIEVE pane -->
+  <div id="achievePane" style="display:none;flex-direction:column;width:100%;max-width:480px;padding:0 20px 40px;gap:12px;overflow-y:auto;max-height:60vh;">
+    <div class="ach-card" id="ach50k">
+      <div class="ach-icon">🏆</div>
+      <div class="ach-info">
+        <div class="ach-name">점수 5만점 돌파</div>
+        <div class="ach-desc">한 게임에서 50,000점 이상을 달성하세요.<br>달성 시 랭킹 시트에 자동 기록됩니다.</div>
+        <div class="ach-progress" id="ach50kProgress">로그인하면 진행 상황을 확인할 수 있어요</div>
+      </div>
+      <div class="ach-badge ach-lock" id="ach50kBadge">미달성</div>
+    </div>
+    <div style="font-size:.7rem;color:#1e293b;text-align:center;letter-spacing:1px;padding-top:8px;">더 많은 도전과제가 추가될 예정</div>
+  </div>
+</div>
+
+<!-- ══ TUTORIAL PICKER ══ -->
+<div id="tutPickerScreen" class="screen" style="flex-direction:column; background:#000; overflow-y:auto;">
+  <div style="width:100%; max-width:480px; margin:0 auto; padding:24px 20px 40px;">
+    <!-- Header -->
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:24px;">
+      <button onclick="show('startScreen')" style="background:none;border:1px solid #1e293b;border-radius:50%;width:36px;height:36px;color:#64748b;cursor:pointer;font-size:1rem;display:flex;align-items:center;justify-content:center;flex-shrink:0;">←</button>
+      <div>
+        <div style="font-size:1.1rem;font-weight:800;letter-spacing:3px;color:#f1f5f9;">튜토리얼</div>
+        <div style="font-size:.7rem;color:#475569;letter-spacing:2px;">배우고 싶은 패턴을 선택하세요</div>
+      </div>
+      <button onclick="startTutorialAll()" style="margin-left:auto;background:linear-gradient(135deg,#7c3aed,#059669);border:none;color:#fff;font-size:.75rem;font-weight:800;padding:8px 16px;border-radius:100px;cursor:pointer;letter-spacing:1px;white-space:nowrap;">전체 →</button>
+    </div>
+
+    <!-- Section: 기본 패턴 -->
+    <div style="font-size:.65rem;letter-spacing:3px;color:#334155;text-transform:uppercase;margin-bottom:10px;padding-left:2px;">기본 패턴</div>
+    <div id="tutPickerList" style="display:flex;flex-direction:column;gap:10px;"></div>
+
+    <!-- Section: 조합 패턴 -->
+    <div style="font-size:.65rem;letter-spacing:3px;color:#334155;text-transform:uppercase;margin:20px 0 10px;padding-left:2px;">🔥 조합 패턴</div>
+    <div id="tutPickerComboList" style="display:flex;flex-direction:column;gap:10px;"></div>
+  </div>
+</div>
+
+<!-- ══ TUTORIAL ══ -->
+<div id="tutorialScreen" class="screen" style="flex-direction:column; background:#000; position:relative; overflow:hidden;">
+
+  <!-- Tutorial Game HUD -->
+  <div class="hud" id="tutHud">
+    <div style="display:flex;align-items:center;gap:10px;">
+      <button onclick="exitTutorial()" style="background:none;border:1px solid #1e293b;border-radius:50%;width:32px;height:32px;color:#64748b;cursor:pointer;font-size:.9rem;display:flex;align-items:center;justify-content:center;">←</button>
+      <div>
+        <div style="font-size:.55rem;letter-spacing:2px;color:#475569;text-transform:uppercase;">튜토리얼</div>
+        <div style="font-size:.75rem;font-weight:800;color:#f1f5f9;" id="tutStepLabel">준비중...</div>
+      </div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:.55rem;letter-spacing:2px;color:#475569;text-transform:uppercase;">진행</div>
+      <div style="font-size:1rem;font-weight:800;color:#60a5fa;" id="tutProgressLabel">0 / 11</div>
+    </div>
+    <div style="text-align:center;min-width:64px;">
+      <div style="font-size:.55rem;letter-spacing:2px;color:#475569;text-transform:uppercase;">정답</div>
+      <div style="font-size:1.1rem;font-weight:800;color:#34d399;" id="tutCorrectCount">0</div>
+    </div>
+  </div>
+
+  <!-- Timer bar -->
+  <div class="timer-bar-wrap">
+    <div class="timer-bar" id="tutTimerBar" style="width:100%;"></div>
+  </div>
+
+  <!-- Tutorial panels -->
+  <div class="panels" id="tutPanelsWrap" style="width:100%;">
+    <div class="panel panel-left"  id="tutPanelLeft"  onclick="onTutPanelClick('left',event)">
+      <div class="panel-label" id="tutLabelLeft">← LEFT</div>
+      <div class="panel-icon" id="tutIconLeft">◀</div>
+    </div>
+    <div class="panel panel-right" id="tutPanelRight" onclick="onTutPanelClick('right',event)">
+      <div class="panel-label" id="tutLabelRight">RIGHT →</div>
+      <div class="panel-icon" id="tutIconRight">▶</div>
+    </div>
+  </div>
+
+  <!-- Center zone -->
+  <div class="center-zone" style="gap:8px;">
+    <div id="tutCoachBubble" style="
+      background:rgba(10,10,30,.95); border:1px solid #1e293b; border-radius:16px;
+      padding:10px 16px; max-width:260px; text-align:center;
+      font-size:.8rem; color:#94a3b8; line-height:1.6; pointer-events:none;
+      transition:opacity .3s; opacity:0;">
+    </div>
+    <div class="arrow-card pat-white" id="tutArrowCard">
+      <span class="arrow-sym" id="tutArrowSym">?</span>
+      <div id="tutRedNum" style="font-size:1.5rem;font-weight:900;color:#f87171;display:none;"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="tutToast"></div>
+
+  <!-- Step complete overlay -->
+  <div id="tutStepComplete" style="
+    display:none; position:absolute; inset:0; z-index:50;
+    background:rgba(0,0,0,.82); flex-direction:column;
+    align-items:center; justify-content:center; gap:16px;">
+    <div id="tutStepCompleteIcon" style="font-size:3rem;">✅</div>
+    <div id="tutStepCompleteTitle" style="font-size:1.3rem;font-weight:900;color:#f1f5f9;letter-spacing:2px;text-align:center;padding:0 24px;"></div>
+    <div id="tutStepCompleteDesc" style="font-size:.85rem;color:#64748b;text-align:center;padding:0 32px;line-height:1.6;max-width:340px;"></div>
+    <button id="tutNextBtn" onclick="tutAdvanceStep()" style="
+      background:linear-gradient(135deg,#7c3aed,#059669);
+      border:none;color:#fff;font-size:.95rem;font-weight:800;
+      padding:14px 40px;border-radius:100px;cursor:pointer;letter-spacing:2px;
+      box-shadow:0 0 24px rgba(124,58,237,.4);margin-top:8px;">
+      다음 →
+    </button>
+  </div>
+
+  <!-- Final complete overlay -->
+  <div id="tutAllDone" style="
+    display:none; position:absolute; inset:0; z-index:50;
+    background:rgba(0,0,0,.9); flex-direction:column;
+    align-items:center; justify-content:center; gap:14px; padding:24px;">
+    <div style="font-size:2.8rem;">🎉</div>
+    <div style="font-size:1.4rem;font-weight:900;color:#f1f5f9;letter-spacing:3px;">튜토리얼 완료!</div>
+    <div style="font-size:.85rem;color:#64748b;text-align:center;line-height:1.7;max-width:300px;">
+      모든 패턴을 배웠습니다.<br>실전에서 실력을 발휘해보세요!
+    </div>
+    <button onclick="startGame()" style="
+      background:linear-gradient(135deg,#7c3aed,#059669);
+      border:none;color:#fff;font-size:1rem;font-weight:800;
+      padding:16px 48px;border-radius:100px;cursor:pointer;letter-spacing:3px;
+      box-shadow:0 0 28px rgba(124,58,237,.4);margin-top:8px;">
+      ▶ 실전 시작
+    </button>
+    <button onclick="show('tutPickerScreen')" style="background:none;border:none;color:#334155;cursor:pointer;font-size:.8rem;padding:8px;">
+      ← 튜토리얼 목록
+    </button>
+  </div>
+
+</div><!-- /#tutorialScreen -->
+
+<!-- ══ GAME ══ -->
+<div id="gameScreen" class="screen">
+  <div class="hud">
+    <div class="hud-block">
+      <div class="hud-label">Score</div>
+      <div class="hud-value purple" id="scoreDisplay">0</div>
+    </div>
+    <div class="hud-block">
+      <div class="lives-row" id="livesRow"></div>
+      <div class="hud-label" style="margin-top:2px">LIVES</div>
+    </div>
+    <div class="hud-block">
+      <div class="hud-label">Wave</div>
+      <div class="hud-value green" id="waveDisplay">1</div>
+    </div>
+  </div>
+
+  <div class="timer-bar-wrap">
+    <div class="timer-bar" id="timerBar"></div>
+  </div>
+
+  <div class="panels" id="panelsWrap">
+    <div class="panel panel-left"  id="panelLeft"  onclick="onPanelClick('left',event)">
+      <div class="panel-label" id="labelLeft">← LEFT</div>
+      <div class="panel-icon" id="iconLeft">◀</div>
+    </div>
+    <div class="panel panel-right" id="panelRight" onclick="onPanelClick('right',event)">
+      <div class="panel-label" id="labelRight">RIGHT →</div>
+      <div class="panel-icon" id="iconRight">▶</div>
+    </div>
+  </div>
+
+  <div class="center-zone">
+    <div class="wave-chip">WAVE <span id="waveBadge">1</span></div>
+    <div class="arrow-card pat-white" id="arrowCard">
+      <span class="arrow-sym" id="arrowSym">?</span>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+</div>
+
+<!-- ══ RESULT ══ -->
+<div id="resultScreen" class="screen">
+  <h2>GAME OVER</h2>
+  <div class="result-sub">FINAL RESULTS</div>
+  <div class="new-rec" id="newRec" style="display:none">🏆 NEW RECORD!</div>
+  <div class="result-grid">
+    <div class="r-card c1"><div class="r-label">Best Score</div><div class="r-val" id="rBestScore">0</div></div>
+    <div class="r-card c2"><div class="r-label">Best Wave</div> <div class="r-val" id="rBestWave">0</div></div>
+    <div class="r-card c3"><div class="r-label">This Score</div><div class="r-val" id="rScore">0</div></div>
+    <div class="r-card c4"><div class="r-label">Accuracy</div>  <div class="r-val" id="rAcc">0%</div></div>
+  </div>
+  <button class="btn-retry" onclick="startGame()">▶ RETRY</button>
+  <button class="btn-home"  onclick="goHome()">← 처음으로</button>
+</div>
+
+<script>
+/* ════════════════════════════════
+   WEB AUDIO
+════════════════════════════════ */
+const AC = new (window.AudioContext || window.webkitAudioContext)();
+let muted = false;
+let bgNodes = [], bgInterval = null;
+
+function toggleMute() {
+  muted = !muted;
+  document.getElementById('muteBtn').textContent = muted ? '🔇' : '🔊';
+}
+function resumeAC() { if (AC.state === 'suspended') AC.resume(); }
+
+function mkOsc(freq, type, dur, vol=0.25, t0=0) {
+  if (muted) return;
+  const t = AC.currentTime + t0;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  g.connect(AC.destination);
+  const o = AC.createOscillator();
+  o.type = type; o.frequency.setValueAtTime(freq, t);
+  o.connect(g); o.start(t); o.stop(t + dur);
+}
+function mkNoise(dur, vol=0.15, hp=800, t0=0) {
+  if (muted) return;
+  const t = AC.currentTime + t0;
+  const buf = AC.createBuffer(1, AC.sampleRate * dur, AC.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const src = AC.createBufferSource(); src.buffer = buf;
+  const flt = AC.createBiquadFilter(); flt.type = 'highpass'; flt.frequency.value = hp;
+  const g = AC.createGain();
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  src.connect(flt); flt.connect(g); g.connect(AC.destination);
+  src.start(t); src.stop(t + dur);
+}
+
+function sfxCorrect()  { mkOsc(440,'sine',.1,.22); mkOsc(660,'sine',.16,.18,.06); mkOsc(880,'sine',.13,.13,.11); }
+function sfxWrong()    { mkOsc(180,'sawtooth',.16,.3); mkNoise(.18,.2,180,.04); mkOsc(130,'sawtooth',.18,.22,.07); }
+function sfxTimeout()  { mkOsc(320,'square',.1,.2); mkOsc(220,'square',.14,.2,.07); mkOsc(140,'square',.18,.2,.14); }
+function sfxTapOk()    { mkOsc(500,'sine',.07,.14); }
+function sfxRedSkip()  { mkOsc(600,'sine',.1,.2); mkOsc(900,'sine',.16,.18,.07); mkNoise(.1,.07,3000,.04); }
+function sfxLevelUp()  { [523,659,784,1047].forEach((f,i) => mkOsc(f,'sine',.18,.22,i*.07)); }
+function sfxGameOver() { [380,280,200,110].forEach((f,i) => mkOsc(f,'sawtooth',.22,.28,i*.09)); }
+
+function startBGM() {
+  stopBGM();
+  const kick = () => {
+    if (muted) return;
+    const t = AC.currentTime;
+    const g = AC.createGain(); g.gain.setValueAtTime(.45,t); g.gain.exponentialRampToValueAtTime(.001,t+.28); g.connect(AC.destination);
+    const o = AC.createOscillator(); o.frequency.setValueAtTime(140,t); o.frequency.exponentialRampToValueAtTime(38,t+.2);
+    o.connect(g); o.start(t); o.stop(t+.3); bgNodes.push(g);
+  };
+  const hihat = () => {
+    if (muted) return;
+    const t = AC.currentTime;
+    const buf = AC.createBuffer(1, AC.sampleRate*.04, AC.sampleRate);
+    const d = buf.getChannelData(0); for (let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    const src = AC.createBufferSource(); src.buffer = buf;
+    const flt = AC.createBiquadFilter(); flt.type='highpass'; flt.frequency.value=9000;
+    const g = AC.createGain(); g.gain.setValueAtTime(.06,t); g.gain.exponentialRampToValueAtTime(.001,t+.04);
+    src.connect(flt); flt.connect(g); g.connect(AC.destination); bgNodes.push(g);
+    src.start(t); src.stop(t+.04);
+  };
+  const NOTES=[261.63,329.63,392,523.25,659.25,392,329.63,261.63]; let ni=0;
+  const arp = () => {
+    if (muted) return;
+    const t = AC.currentTime;
+    const g = AC.createGain(); g.gain.setValueAtTime(.035,t); g.gain.exponentialRampToValueAtTime(.001,t+.16); g.connect(AC.destination);
+    const o = AC.createOscillator(); o.type='triangle'; o.frequency.value=NOTES[ni%NOTES.length]; ni++;
+    o.connect(g); o.start(t); o.stop(t+.18); bgNodes.push(g);
+  };
+  let step=0;
+  const interval=(60/122)*1000/2;
+  bgInterval=setInterval(()=>{
+    if(AC.state==='suspended') return;
+    if(step%8===0) kick();
+    if(step%8===4) kick();
+    hihat();
+    if(step%2===0) arp();
+    step++;
+    if(bgNodes.length>70) bgNodes=bgNodes.slice(-50);
+  }, interval);
+}
+function stopBGM() { if(bgInterval){clearInterval(bgInterval);bgInterval=null;} bgNodes=[]; }
+
+/* ════════════════════════════════
+   PATTERN SYSTEM
+════════════════════════════════ */
+// white=normal, yellow=2tap, red=no-tap, blue=reverse, purple=3tap
+// orange=swap LR buttons, green=switch to vertical (up/down) buttons
+const PAT_UNLOCK = { white:1, yellow:4, red:7, blue:10, purple:14, orange:6, green:9 };
+
+function getPatternPool(wave) {
+  const pool=[];
+  pool.push('white','white','white'); // always majority
+  if(wave>=4)  pool.push('yellow','yellow');
+  if(wave>=6)  pool.push('orange');
+  if(wave>=7)  pool.push('red','red');
+  if(wave>=9)  pool.push('green');
+  if(wave>=10) pool.push('blue','blue');
+  if(wave>=14) pool.push('purple');
+  return pool;
+}
+
+/* ════════════════════════════════
+   GAME CONFIG
+════════════════════════════════ */
+const BASE_TIME   = 3200;
+const MIN_TIME    = 700;
+const TIME_DECAY  = 65;      // ms per wave — slow ramp
+const RED_MS      = 1000;    // red pattern survive duration — 1 second
+
+const BASE_SCORE  = 100;
+const WAVE_BONUS  = 40;
+const TIME_BONUS  = 700;
+const WRONG_PEN   = -80;
+const TIMEOUT_PEN = -50;
+const MAX_LIVES   = 3;
+
+/* ════════════════════════════════
+   STATE
+════════════════════════════════ */
+let gs={}, bestScore=0, bestWave=1;
+
+/* updateStartBest: Firebase 모듈의 onAuthStateChanged 및 loadMyBest에서 호출 */
+function updateStartBest() {
+  const el = document.getElementById('startBestDisplay');
+  if (!el) return;
+  if (bestScore > 0) {
+    el.innerHTML = `<span style="font-size:.65rem;letter-spacing:2px;color:#334155;text-transform:uppercase;">BEST</span><br><span style="font-size:1.4rem;font-weight:900;color:#a78bfa;">${bestScore.toLocaleString()}</span><span style="font-size:.75rem;color:#475569;margin-left:8px;">Wave ${bestWave}</span>`;
+  } else {
+    el.innerHTML = `<span style="font-size:.7rem;color:#334155;letter-spacing:2px;">로그인하면 기록이 저장돼요</span>`;
+  }
+}
+let raf=null, timerStart=0, timerDur=0;
+let accepting=false, tapCount=0, tapNeeded=0;
+
+// Layout modifiers — persist until next orange/green pattern
+// panelSwapped: left↔right buttons are visually flipped
+// panelVertical: up/down layout instead of left/right
+let panelSwapped=false, panelVertical=false;
+
+/* ════════════════════════════════
+   UTILS
+════════════════════════════════ */
+function show(id) {
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+function goHome() { stopBGM(); stopTimer(); show('startScreen'); }
+function getDur(wave) { return Math.max(MIN_TIME, BASE_TIME - (wave-1)*TIME_DECAY); }
+
+function flash(cls) {
+  const el=document.getElementById('flash'); el.className=cls;
+  setTimeout(()=>el.className='',180);
+}
+function spawnFloater(txt,color,x,y) {
+  const el=document.createElement('div'); el.className='floater';
+  el.style.cssText=`left:${x}px;top:${y}px;color:${color}`;
+  el.textContent=txt; document.body.appendChild(el);
+  setTimeout(()=>el.remove(),800);
+}
+function showToast(msg,cls) {
+  const t=document.getElementById('toast');
+  t.textContent=msg; t.className='toast show '+cls;
+  clearTimeout(t._tid);
+  t._tid=setTimeout(()=>{t.className='toast';},1100);
+}
+function renderLives() {
+  const row=document.getElementById('livesRow'); row.innerHTML='';
+  for(let i=0;i<MAX_LIVES;i++){
+    const h=document.createElement('span');
+    h.className='heart'+(i>=gs.lives?' dead':''); h.textContent='❤️';
+    row.appendChild(h);
+  }
+}
+
+/* ════════════════════════════════
+   TIMER
+════════════════════════════════ */
+function startTimer() {
+  timerDur=getDur(gs.wave); timerStart=performance.now();
+  function tick(now){
+    const pct=Math.max(0,1-(now-timerStart)/timerDur);
+    const bar=document.getElementById('timerBar');
+    bar.style.width=(pct*100)+'%';
+    bar.className='timer-bar'+(pct<.28?' danger':'');
+    if(pct<=0){ onTimeout(); return; }
+    raf=requestAnimationFrame(tick);
+  }
+  raf=requestAnimationFrame(tick);
+}
+function stopTimer() { if(raf){cancelAnimationFrame(raf);raf=null;} }
+function getTimeBonus() {
+  const r=Math.max(0,1-(performance.now()-timerStart)/timerDur);
+  return Math.round(TIME_BONUS*r*r);
+}
+
+/* ════════════════════════════════
+   ARROW CARD UI
+════════════════════════════════ */
+function setArrowCard(pat) {
+  const card=document.getElementById('arrowCard');
+  card.className='arrow-card pat-'+pat;
+
+  // Red countdown number — always remove old one first
+  const oldRn=document.getElementById('redNum');
+  if(oldRn) oldRn.remove();
+  const dotsEl=document.getElementById('tapDots');
+  if(dotsEl) dotsEl.innerHTML='';
+  if(pat==='red'){
+    const s=document.createElement('div'); s.className='red-num'; s.id='redNum'; s.textContent='';
+    if(dotsEl) dotsEl.appendChild(s);
+    else { s.style.marginTop='6px'; card.appendChild(s); }
+  }
+}
+
+function updateTapDots(filled) { /* dots removed */ }
+
+/* ════════════════════════════════
+   GAME FLOW
+════════════════════════════════ */
+function startGame() {
+  resumeAC();
+  gs={score:0,wave:1,lives:MAX_LIVES,correct:0,attempts:0,current:null,pattern:null};
+  panelSwapped=false; panelVertical=false;
+  show('gameScreen');
+  document.getElementById('scoreDisplay').textContent='0';
+  renderLives();
+  startBGM();
+  nextArrow();
+}
+
+function nextArrow() {
+  accepting=true; tapCount=0;
+
+  // Pick pattern
+  const pool=getPatternPool(gs.wave);
+  gs.pattern=pool[Math.floor(Math.random()*pool.length)];
+  gs.current=Math.random()<.5?'left':'right';
+  tapNeeded=gs.pattern==='yellow'?2:gs.pattern==='purple'?3:1;
+
+  // Orange: toggle swapped state
+  if(gs.pattern==='orange') panelSwapped=!panelSwapped;
+  // Green: toggle vertical state
+  if(gs.pattern==='green')  panelVertical=!panelVertical;
+
+  // Update displays
+  // Arrow always shows the logical direction (left/right text)
+  const arrowLabels={left:'⬅️', right:'➡️'};
+  // For vertical layout, map left→up, right→down visually but keep gs.current as left/right internally
+  if(panelVertical) {
+    document.getElementById('arrowSym').textContent=gs.current==='left'?'⬆️':'⬇️';
+  } else {
+    document.getElementById('arrowSym').textContent=arrowLabels[gs.current];
+  }
+  document.getElementById('waveDisplay').textContent=gs.wave;
+  document.getElementById('waveBadge').textContent=gs.wave;
+  setArrowCard(gs.pattern);
+  applyPanelLayout();
+
+  // Panel class no longer needed for tint (arrow card only changes)
+  const pw=document.getElementById('panelsWrap');
+  let pwClass='panels';
+  if(panelSwapped)  pwClass+=' swapped';
+  if(panelVertical) pwClass+=' vertical';
+  pw.className=pwClass;
+
+  // Reset panels
+  ['panelLeft','panelRight'].forEach(id=>{
+    const el=document.getElementById(id);
+    el.className=el.className.replace(/\s*(hit|miss|ripple)/g,'');
+  });
+
+  stopTimer();
+
+  if(gs.pattern==='red'){
+    startRedTimer();
+  } else {
+    startTimer();
+  }
+}
+
+function applyPanelLayout() {
+  const pw=document.getElementById('panelsWrap');
+
+  // Remove old badges
+  pw.querySelectorAll('.panel-mod-badge').forEach(b=>b.remove());
+
+  if(panelVertical) {
+    // Vertical: top panel = "up" (maps to left/A), bottom = "down" (maps to right/B)
+    document.getElementById('labelLeft').textContent='↑ UP';
+    document.getElementById('iconLeft').textContent='▲';
+    document.getElementById('labelRight').textContent='DOWN ↓';
+    document.getElementById('iconRight').textContent='▼';
+    // Badge
+    addBadge('panelLeft','↕ 상하모드','green-badge');
+  } else if(panelSwapped) {
+    // Swapped: LEFT label is on right side visually, RIGHT on left side
+    document.getElementById('labelLeft').textContent='← LEFT';
+    document.getElementById('iconLeft').textContent='◀';
+    document.getElementById('labelRight').textContent='RIGHT →';
+    document.getElementById('iconRight').textContent='▶';
+    // Badge to warn
+    addBadge('panelLeft','↔ 반전중','orange-badge');
+    addBadge('panelRight','↔ 반전중','orange-badge');
+  } else {
+    // Normal
+    document.getElementById('labelLeft').textContent='← LEFT';
+    document.getElementById('iconLeft').textContent='◀';
+    document.getElementById('labelRight').textContent='RIGHT →';
+    document.getElementById('iconRight').textContent='▶';
+  }
+}
+
+function addBadge(panelId, text, cls) {
+  const b=document.createElement('div');
+  b.className='panel-mod-badge '+cls;
+  b.textContent=text;
+  document.getElementById(panelId).appendChild(b);
+}
+
+/* ── RED PATTERN: survive countdown ── */
+function startRedTimer() {
+  timerDur=RED_MS; timerStart=performance.now();
+  const bar=document.getElementById('timerBar');
+  bar.className='timer-bar danger';
+
+  function tick(now){
+    const pct=Math.max(0,1-(now-timerStart)/RED_MS);
+    bar.style.width=(pct*100)+'%';
+    const rn=document.getElementById('redNum');
+    if(rn) rn.textContent=Math.ceil(pct*(RED_MS/1000))+'s';
+    if(pct<=0){ onRedSuccess(); return; }
+    raf=requestAnimationFrame(tick);
+  }
+  raf=requestAnimationFrame(tick);
+}
+
+function onRedSuccess() {
+  if(!accepting) return;
+  accepting=false; stopTimer();
+  gs.correct++; gs.attempts++;
+
+  const tb=getTimeBonus(), wb=BASE_SCORE+(gs.wave-1)*WAVE_BONUS, gain=tb+wb;
+  gs.score+=gain;
+
+  document.getElementById('arrowCard').className='arrow-card ac-skip';
+  document.getElementById('scoreDisplay').textContent=gs.score;
+  showToast(`🚫 버텼다! +${gain}`,'skip');
+  spawnFloater('+'+gain,'#4ade80',window.innerWidth/2,window.innerHeight*.5);
+  sfxRedSkip(); flash('g');
+
+  gs.wave++;
+  if(gs.wave%5===1&&gs.wave>1) sfxLevelUp();
+  setTimeout(nextArrow,380);
+}
+
+/* ── Panel click ── */
+function onPanelClick(side, e) {
+  if(!accepting) return;
+  resumeAC();
+
+  // RED: any click = fail
+  if(gs.pattern==='red'){
+    stopTimer(); accepting=false;
+    doFail(side, e.clientX, e.clientY, '눌러버렸다!');
+    return;
+  }
+
+  // CSS .panels.swapped uses flex order to visually swap panels,
+  // but onclick still fires with the physical DOM element's side ('left'/'right').
+  // The LEFT label always lives in the physical left DOM → clicking the LEFT label
+  // always yields side='left' regardless of visual position.
+  // So no remapping needed: side directly equals the label the player pressed.
+  const logicalSide = side;
+
+  // Check direction — blue reverses; all others match arrow direction
+  const dirOk = gs.pattern==='blue' ? (logicalSide!==gs.current) : (logicalSide===gs.current);
+  if(!dirOk){
+    stopTimer(); accepting=false;
+    doFail(side, e.clientX, e.clientY, '방향 틀림!');
+    return;
+  }
+
+  // Correct tap
+  tapCount++;
+  sfxTapOk();
+  const panel=document.getElementById(side==='left'?'panelLeft':'panelRight');
+  triggerRipple(panel,e.clientX,e.clientY);
+  panel.classList.add('hit'); setTimeout(()=>panel.classList.remove('hit'),160);
+
+  if(gs.pattern==='yellow'||gs.pattern==='purple'){
+    updateTapDots(tapCount);
+  }
+
+  if(tapCount<tapNeeded) return; // need more
+
+  // All taps done
+  stopTimer(); accepting=false;
+  gs.correct++; gs.attempts++;
+
+  const tb=getTimeBonus(), wb=BASE_SCORE+(gs.wave-1)*WAVE_BONUS;
+  const mult=gs.pattern==='purple'?1.8:gs.pattern==='blue'?1.5:gs.pattern==='yellow'?1.4:gs.pattern==='orange'?1.3:gs.pattern==='green'?1.35:1;
+  const gain=Math.round((tb+wb)*mult);
+  gs.score+=gain;
+
+  const correctSide=gs.pattern==='blue'?(gs.current==='left'?'right':'left'):gs.current;
+  document.getElementById('arrowCard').className='arrow-card ac-correct-'+correctSide;
+  document.getElementById('scoreDisplay').textContent=gs.score;
+
+  const labels={
+    yellow:`×2 콤보! +${gain}`,
+    purple:`×3 콤보! +${gain}`,
+    blue:`리버스! +${gain}`,
+    orange:`↔ 반전! +${gain}`,
+    green:`↕ 수직! +${gain}`
+  };
+  showToast(labels[gs.pattern]||`+${gain}`,'ok');
+  spawnFloater('+'+gain,'#34d399',e.clientX,e.clientY);
+  sfxCorrect(); flash('g');
+
+  gs.wave++;
+  if(gs.wave%5===1&&gs.wave>1) sfxLevelUp();
+  setTimeout(nextArrow,380);
+}
+
+function doFail(side, x, y, msg) {
+  gs.score=Math.max(0,gs.score+WRONG_PEN); gs.lives--; gs.attempts++;
+  document.getElementById('arrowCard').className='arrow-card ac-wrong';
+  const panel=document.getElementById(side==='left'?'panelLeft':'panelRight');
+  panel.classList.add('miss');
+  document.getElementById('scoreDisplay').textContent=gs.score;
+  showToast(`${msg} ${WRONG_PEN}`,'bad');
+  spawnFloater(String(WRONG_PEN),'#f87171',x,y);
+  sfxWrong(); flash('r'); renderLives();
+  if(gs.lives<=0){ setTimeout(endGame,450); return; }
+  setTimeout(nextArrow,480);
+}
+
+function onTimeout() {
+  if(!accepting) return;
+  accepting=false;
+  gs.score=Math.max(0,gs.score+TIMEOUT_PEN); gs.lives--; gs.attempts++;
+  document.getElementById('arrowCard').className='arrow-card ac-wrong';
+  document.getElementById('scoreDisplay').textContent=gs.score;
+  showToast('시간 초과! '+TIMEOUT_PEN,'timeout');
+  sfxTimeout(); flash('r'); renderLives();
+  if(gs.lives<=0){ setTimeout(endGame,450); return; }
+  setTimeout(nextArrow,420);
+}
+
+function endGame() {
+  stopBGM(); stopTimer(); sfxGameOver();
+  const acc = gs.attempts > 0 ? Math.round(gs.correct / gs.attempts * 100) : 0;
+  const isNewScore = gs.score > bestScore;
+  const isNewWave  = gs.wave  > bestWave;
+  const isNew = isNewScore || isNewWave;
+  if (isNewScore) bestScore = gs.score;
+  if (isNewWave)  bestWave  = gs.wave;
+  if (isNew) updateStartBest();
+
+  // Firebase 저장 (로그인 상태이면)
+  if (window.fbSaveBest) {
+    window.fbSaveBest(gs.score, gs.wave, acc, gs.correct, gs.attempts);
+  }
+
+  document.getElementById('rBestScore').textContent = bestScore.toLocaleString();
+  document.getElementById('rBestWave').textContent  = bestWave;
+  document.getElementById('rScore').textContent     = gs.score.toLocaleString();
+  document.getElementById('rAcc').textContent       = acc + '%';
+  document.getElementById('newRec').style.display   = isNew ? 'block' : 'none';
+
+  // 도전과제 달성 알림
+  if (gs.score >= 50000) {
+    setTimeout(() => showToast('🏆 50,000점 달성!', 'ok'), 600);
+  }
+
+  show('resultScreen');
+}
+
+function triggerRipple(el,x,y){
+  const r=el.getBoundingClientRect();
+  el.style.setProperty('--rx',((x-r.left)/r.width*100)+'%');
+  el.style.setProperty('--ry',((y-r.top)/r.height*100)+'%');
+  el.classList.add('ripple');
+  setTimeout(()=>el.classList.remove('ripple'),300);
+}
+
+/* ════════════════════════════════
+   TUTORIAL — INTERACTIVE GAME MODE
+   Steps: white → yellow → red → blue → purple → orange → green
+   Each step: show coach tip overlay, then play N rounds of that pattern.
+   After all steps done → tutAllDone overlay.
+════════════════════════════════ */
+
+// Each step: pat = arrow pattern (determines tap count & direction rule)
+//            layout = 'normal' | 'swapped' | 'vertical'  (panel modifier)
+const TUT_STEPS = [
+  {
+    pat: 'white', layout: 'normal',
+    colorName: '흰색',        // shown big
+    subtitle: '기본 방향',    // shown small
+    patColor: '#94a3b8', layoutColor: null,
+    label: '기본 패턴',
+    rounds: 3, icon: '⬅➡',
+    title: '기본 패턴 — 흰색 테두리',
+    intro: '화살표 방향과 <b style="color:#f1f5f9">같은 쪽</b>을 누르세요!\n흰색 테두리 = 평범하게 화살표 방향 그대로!',
+    tip: '⬅️ 보이면 왼쪽, ➡️ 보이면 오른쪽을 눌러요.',
+    complete: '완벽해요! 기본 패턴 마스터! 🎉',
+    completeSub: '화살표와 같은 방향을 빠르게 누를수록 시간 보너스가 올라가요.'
+  },
+  {
+    pat: 'yellow', layout: 'normal',
+    colorName: '노란색',
+    subtitle: '×2 연속',
+    patColor: '#fde68a', layoutColor: null,
+    label: '노란색 — ×2',
+    rounds: 3, icon: '×2',
+    title: '노란색 테두리 — 2번 연속!',
+    intro: '같은 방향을 <b style="color:#fde68a">2번 연속</b> 눌러야 해요!\n노란 테두리가 보이면 두 번 탭!',
+    tip: '⬅️⬅️ 또는 ➡️➡️ — 방향이 바뀌면 안 돼요!',
+    complete: '노란 패턴 클리어! ✨',
+    completeSub: '같은 방향 2번 연속. 배율 ×1.4로 점수가 높아요!'
+  },
+  {
+    pat: 'red', layout: 'normal',
+    colorName: '빨간색',
+    subtitle: '누르지 말기',
+    patColor: '#fca5a5', layoutColor: null,
+    label: '빨간색 — 참기',
+    rounds: 2, icon: '🚫',
+    title: '빨간색 테두리 — 아무것도 누르지 마세요!',
+    intro: '⚠️ 빨간 테두리가 나오면 <b style="color:#fca5a5">절대 누르면 안 돼요!</b>\n카운트다운이 끝날 때까지 그냥 기다리세요.',
+    tip: '손을 올려두지 마세요! 어느 쪽이든 누르면 목숨을 잃어요.',
+    complete: '빨간 패턴 클리어! 🚫',
+    completeSub: '꾹 참는 게 정답! 버티면 점수를 받아요.'
+  },
+  {
+    pat: 'blue', layout: 'normal',
+    colorName: '파란색',
+    subtitle: '반대 방향',
+    patColor: '#93c5fd', layoutColor: null,
+    label: '파란색 — 반대로',
+    rounds: 3, icon: '↔',
+    title: '파란색 테두리 — 반대 방향!',
+    intro: '파란 테두리엔 <b style="color:#93c5fd">반대 방향</b>을 눌러야 해요!\n⬅️ 화살표면 오른쪽, ➡️ 화살표면 왼쪽!',
+    tip: '헷갈리지 마세요 — 파란색 = 무조건 반대!',
+    complete: '리버스 마스터! 💙',
+    completeSub: '반대로 누르는 파란 패턴. 배율 ×1.5!'
+  },
+  {
+    pat: 'purple', layout: 'normal',
+    colorName: '보라색',
+    subtitle: '×3 연속',
+    patColor: '#c4b5fd', layoutColor: null,
+    label: '보라색 — ×3',
+    rounds: 3, icon: '×3',
+    title: '보라색 테두리 — 3번 연속!',
+    intro: '보라 테두리엔 같은 방향을 <b style="color:#c4b5fd">3번 연속</b> 눌러야 해요!\n⬅️⬅️⬅️ 또는 ➡️➡️➡️',
+    tip: '가장 어렵지만 배율 ×1.8로 최고 점수!',
+    complete: '보라 패턴 클리어! 💜',
+    completeSub: '3번 연속 — 리듬감 있게 연달아 눌러요!'
+  },
+  {
+    pat: 'white', layout: 'swapped',
+    colorName: '주황색',
+    subtitle: '버튼 반전',
+    patColor: '#fdba74', layoutColor: '#fdba74',
+    label: '주황색 — 반전',
+    rounds: 3, icon: '🔀',
+    title: '주황색 효과 — 버튼이 뒤바뀌어요!',
+    intro: '⚠️ <b style="color:#fdba74">좌우 버튼 위치가 반전</b>됩니다!\n화살표와 일치하는 <b style="color:#f1f5f9">라벨</b>을 누르세요.\n예) ⬅️ 화살표 → LEFT 라벨 쪽을 눌러요 (위치가 바뀌어도!).',
+    tip: '라벨을 보세요! 버튼 위치는 바뀌었지만 화살표와 같은 라벨을 누르면 돼요.',
+    complete: '반전 완료! 🟠',
+    completeSub: '주황 패턴마다 반전 상태가 토글됩니다. 라벨을 믿으세요!'
+  },
+  {
+    pat: 'white', layout: 'vertical',
+    colorName: '초록색',
+    subtitle: '상하 모드',
+    patColor: '#86efac', layoutColor: '#86efac',
+    label: '초록색 — 상하',
+    rounds: 3, icon: '↕',
+    title: '초록색 효과 — 상하 모드!',
+    intro: '초록 효과로 <b style="color:#86efac">버튼이 위아래로 바뀌어요!</b>\n⬆️ 화살표면 위쪽, ⬇️ 화살표면 아래쪽을 누르세요.',
+    tip: '화살표가 위아래로 바뀌어요. 화살표와 방향이 같은 쪽!',
+    complete: '상하 마스터! 💚',
+    completeSub: '초록마다 상하↔좌우 레이아웃이 토글됩니다!'
+  },
+  {
+    pat: 'purple', layout: 'vertical',
+    colorName: '초록 + 보라',
+    subtitle: '상하 + ×3 연속',
+    patColor: '#c4b5fd', layoutColor: '#86efac',
+    label: '🔥 초록 + 보라',
+    rounds: 3, icon: '↕×3',
+    title: '🔥 조합 — 상하 버튼으로 3번 연속!',
+    intro: '<b style="color:#86efac">버튼이 위아래</b>로 바뀐 상태에서\n<b style="color:#c4b5fd">보라 패턴(3번 연속)</b>이 나와요!\n같은 방향(위 또는 아래)을 3번 연달아 누르세요.',
+    tip: '위아래 3번 연속! 리듬을 유지하세요.',
+    complete: '조합 클리어! 💜↕',
+    completeSub: '상하 레이아웃에서도 탭 횟수 규칙은 그대로 적용돼요!'
+  },
+  {
+    pat: 'blue', layout: 'vertical',
+    colorName: '초록 + 파랑',
+    subtitle: '상하 + 반대 방향',
+    patColor: '#93c5fd', layoutColor: '#86efac',
+    label: '🔥 초록 + 파랑',
+    rounds: 3, icon: '↕↔',
+    title: '🔥 조합 — 상하 버튼으로 반대 방향!',
+    intro: '<b style="color:#86efac">버튼이 위아래</b>로 바뀐 상태에서\n<b style="color:#93c5fd">파란 패턴(반대 방향)</b>이 나와요!\n⬆️ 화살표면 아래, ⬇️ 화살표면 위를 누르세요.',
+    tip: '상하 레이아웃에서 방향을 반대로! 화살표 반대 쪽을 누르세요.',
+    complete: '상하+반대 클리어! 💙↕',
+    completeSub: '레이아웃이 바뀌어도 파란 규칙(반대)은 그대로예요!'
+  },
+  {
+    pat: 'blue', layout: 'swapped',
+    colorName: '주황 + 파랑',
+    subtitle: '반전 + 반대 방향',
+    patColor: '#93c5fd', layoutColor: '#fdba74',
+    label: '🔥 주황 + 파랑',
+    rounds: 3, icon: '🔀↔',
+    title: '🔥 조합 — 반전 버튼으로 반대 방향!',
+    intro: '<b style="color:#fdba74">버튼이 반전</b>된 상태에서\n<b style="color:#93c5fd">파란 패턴(반대 방향)</b>이 나와요!\n화살표 <b style="color:#f87171">반대 라벨</b>을 찾아서 누르세요.',
+    tip: '두 번 꼬임! 반전된 위치에서 반대 라벨을 눌러야 해요.',
+    complete: '반전+반대 클리어! 🔥',
+    completeSub: '실전에서 가장 어려운 패턴이에요. 라벨에 집중하세요!'
+  },
+  {
+    pat: 'yellow', layout: 'swapped',
+    colorName: '주황 + 노랑',
+    subtitle: '반전 + ×2 연속',
+    patColor: '#fde68a', layoutColor: '#fdba74',
+    label: '🔥 주황 + 노랑',
+    rounds: 3, icon: '🔀×2',
+    title: '🔥 조합 — 반전 버튼으로 2번 연속!',
+    intro: '<b style="color:#fdba74">버튼이 반전</b>된 상태에서\n<b style="color:#fde68a">노란 패턴(2번 연속)</b>이 나와요!\n같은 라벨을 2번 연달아 누르세요.',
+    tip: '반전된 위치에서 같은 라벨 2번! 라벨만 믿으세요.',
+    complete: '반전+×2 클리어! 🟠✨',
+    completeSub: '모든 조합 패턴 완료! 이제 실전 준비 끝!'
+  }
+];
+
+let tutStep = 0;       // current step index
+let tutRound = 0;      // current round within step
+let tutCorrectTotal = 0;
+let tutPat = null;
+let tutDir = null;
+let tutTapCount = 0;
+let tutTapNeeded = 1;
+let tutAccepting = false;
+let tutRaf = null;
+let tutTimerStart = 0;
+let tutSwapped = false;   // mirrors panelSwapped for tutorial
+let tutVertical = false;  // mirrors panelVertical for tutorial
+const TUT_RED_MS = 1000;
+
+
+function renderTutPicker() {
+  const basic = document.getElementById('tutPickerList');
+  const combo = document.getElementById('tutPickerComboList');
+  basic.innerHTML = ''; combo.innerHTML = '';
+
+  TUT_STEPS.forEach((step, idx) => {
+    const isCombo = step.colorName.includes('+');
+    const container = isCombo ? combo : basic;
+
+    // Determine border color
+    const borderCol = step.layoutColor || step.patColor || '#334155';
+    const glowCol = borderCol.replace('#','');
+
+    const card = document.createElement('div');
+    card.style.cssText = `
+      border-radius:16px; border:1px solid ${borderCol}44;
+      background:#080810; cursor:pointer; overflow:hidden;
+      transition:transform .12s, border-color .15s;
+      display:flex; align-items:center; gap:0;
+    `;
+    card.onmouseenter = () => { card.style.borderColor = borderCol+'99'; card.style.transform = 'scale(1.015)'; };
+    card.onmouseleave = () => { card.style.borderColor = borderCol+'44'; card.style.transform = ''; };
+    card.onclick = () => startTutorialFrom(idx);
+
+    // Color accent bar
+    const bar = document.createElement('div');
+    bar.style.cssText = `width:4px; align-self:stretch; flex-shrink:0; background:${borderCol};`;
+    card.appendChild(bar);
+
+    // Content
+    const content = document.createElement('div');
+    content.style.cssText = `flex:1; padding:14px 16px; display:flex; align-items:center; gap:14px;`;
+
+    // Icon bubble
+    const iconWrap = document.createElement('div');
+    iconWrap.style.cssText = `width:42px;height:42px;border-radius:12px;background:${borderCol}22;display:flex;align-items:center;justify-content:center;font-size:1.2rem;flex-shrink:0;`;
+    iconWrap.textContent = step.icon;
+    content.appendChild(iconWrap);
+
+    // Text
+    const textWrap = document.createElement('div');
+    textWrap.style.cssText = `flex:1; min-width:0;`;
+
+    // Big: colorName with colors
+    const nameEl = document.createElement('div');
+    nameEl.style.cssText = `font-size:.95rem;font-weight:800;letter-spacing:.5px;line-height:1.2;`;
+    if (step.layoutColor && step.patColor !== step.layoutColor) {
+      // Two-color combo name
+      const parts = step.colorName.split(' + ');
+      nameEl.innerHTML = `<span style="color:${step.layoutColor}">${parts[0]}</span> <span style="color:#475569">+</span> <span style="color:${step.patColor}">${parts[1]}</span>`;
+    } else {
+      nameEl.innerHTML = `<span style="color:${step.patColor}">${step.colorName}</span>`;
+    }
+    textWrap.appendChild(nameEl);
+
+    // Small: subtitle
+    const subEl = document.createElement('div');
+    subEl.style.cssText = `font-size:.72rem;color:#475569;letter-spacing:1px;margin-top:2px;`;
+    subEl.textContent = step.subtitle;
+    textWrap.appendChild(subEl);
+
+    content.appendChild(textWrap);
+
+    // Arrow
+    const arrow = document.createElement('div');
+    arrow.style.cssText = `font-size:.85rem;color:#334155;padding-right:16px;flex-shrink:0;`;
+    arrow.textContent = '›';
+    content.appendChild(arrow);
+
+    card.appendChild(content);
+    container.appendChild(card);
+  });
+}
+
+function startTutorial() {
+  renderTutPicker();
+  show('tutPickerScreen');
+}
+
+function startTutorialAll() {
+  startTutorialFrom(0);
+}
+
+function startTutorialFrom(startIdx) {
+  tutStep = startIdx;
+  tutRound = 0;
+  tutCorrectTotal = 0;
+  tutSwapped = false;
+  tutVertical = false;
+  tutAccepting = false;
+  stopTutTimer();
+  document.getElementById('tutCorrectCount').textContent = '0';
+  document.getElementById('tutAllDone').style.display = 'none';
+  document.getElementById('tutStepComplete').style.display = 'none';
+  show('tutorialScreen');
+  tutShowStepIntro();
+}
+
+function tutShowStepIntro() {
+  const step = TUT_STEPS[tutStep];
+  tutAccepting = false;
+  stopTutTimer();
+
+  // Update HUD — show colorName + subtitle
+  const hudLabel = document.getElementById('tutStepLabel');
+  hudLabel.textContent = step.colorName;
+
+  document.getElementById('tutProgressLabel').textContent = (tutStep + 1) + ' / ' + TUT_STEPS.length;
+
+  // Build colorName display with color spans for overlay icon area
+  let colorHtml;
+  if (step.layoutColor && step.patColor !== step.layoutColor) {
+    const parts = step.colorName.split(' + ');
+    colorHtml = `<span style="color:${step.layoutColor}">${parts[0]}</span> <span style="color:#64748b">+</span> <span style="color:${step.patColor}">${parts[1]}</span>`;
+  } else {
+    colorHtml = `<span style="color:${step.patColor}">${step.colorName}</span>`;
+  }
+
+  // Show step complete overlay as intro
+  const overlay = document.getElementById('tutStepComplete');
+  overlay.style.display = 'flex';
+  document.getElementById('tutStepCompleteIcon').textContent = step.icon;
+  document.getElementById('tutStepCompleteTitle').innerHTML =
+    `<div style="font-size:1.4rem;font-weight:900;letter-spacing:1px;">${colorHtml}</div>` +
+    `<div style="font-size:.75rem;color:#64748b;letter-spacing:2px;font-weight:500;margin-top:4px;">${step.subtitle}</div>`;
+  document.getElementById('tutStepCompleteDesc').innerHTML = step.intro.replace(/\n/g,'<br>') +
+    '<br><br><span style="font-size:.75rem;color:#475569;display:block;margin-top:4px;">💡 ' + step.tip + '</span>';
+  document.getElementById('tutNextBtn').textContent = '시작 →';
+}
+
+function tutAdvanceStep() {
+  // Hide overlay
+  document.getElementById('tutStepComplete').style.display = 'none';
+
+  // Check if we just finished all steps
+  if (tutStep >= TUT_STEPS.length) {
+    // All done — reset layout state
+    tutSwapped = false; tutVertical = false;
+    tutApplyPanelLayout();
+    document.getElementById('tutAllDone').style.display = 'flex';
+    return;
+  }
+
+  tutRound = 0;
+  tutStartRound();
+}
+
+function tutStartRound() {
+  const step = TUT_STEPS[tutStep];
+  tutPat = step.pat;
+  tutAccepting = false;
+  tutTapCount = 0;
+  tutTapNeeded = tutPat === 'yellow' ? 2 : tutPat === 'purple' ? 3 : 1;
+  tutDir = Math.random() < 0.5 ? 'left' : 'right';
+
+  // Apply layout directly from step definition
+  const layout = step.layout || 'normal';
+  tutSwapped  = layout === 'swapped';
+  tutVertical = layout === 'vertical';
+
+  // Apply panel layout
+  tutApplyPanelLayout();
+
+  // Set arrow card
+  const card = document.getElementById('tutArrowCard');
+  card.className = 'arrow-card pat-' + tutPat;
+  if (tutVertical) {
+    document.getElementById('tutArrowSym').textContent = tutDir === 'left' ? '⬆️' : '⬇️';
+  } else {
+    document.getElementById('tutArrowSym').textContent = tutDir === 'left' ? '⬅️' : '➡️';
+  }
+
+  const rn = document.getElementById('tutRedNum');
+  rn.style.display = tutPat === 'red' ? 'block' : 'none';
+  rn.textContent = '';
+
+  // Show coach bubble with tip
+  tutShowCoach(step.tip);
+
+  stopTutTimer();
+  tutAccepting = true;
+  if (tutPat === 'red') {
+    tutStartRedTimer();
+  } else {
+    tutStartTimer();
+  }
+}
+
+function tutApplyPanelLayout() {
+  const pw = document.getElementById('tutPanelsWrap');
+  // Remove old badges
+  pw.querySelectorAll('.panel-mod-badge').forEach(b => b.remove());
+
+  if (tutVertical) {
+    let pwClass = 'panels vertical';
+    pw.className = pwClass;
+    document.getElementById('tutLabelLeft').textContent = '↑ UP';
+    document.getElementById('tutIconLeft').textContent = '▲';
+    document.getElementById('tutLabelRight').textContent = 'DOWN ↓';
+    document.getElementById('tutIconRight').textContent = '▼';
+    const b = document.createElement('div');
+    b.className = 'panel-mod-badge green-badge';
+    b.textContent = '↕ 상하모드';
+    document.getElementById('tutPanelLeft').appendChild(b);
+  } else if (tutSwapped) {
+    pw.className = 'panels swapped';
+    document.getElementById('tutLabelLeft').textContent = '← LEFT';
+    document.getElementById('tutIconLeft').textContent = '◀';
+    document.getElementById('tutLabelRight').textContent = 'RIGHT →';
+    document.getElementById('tutIconRight').textContent = '▶';
+    ['tutPanelLeft','tutPanelRight'].forEach(id => {
+      const b = document.createElement('div');
+      b.className = 'panel-mod-badge orange-badge';
+      b.textContent = '↔ 반전중';
+      document.getElementById(id).appendChild(b);
+    });
+  } else {
+    pw.className = 'panels';
+    document.getElementById('tutLabelLeft').textContent = '← LEFT';
+    document.getElementById('tutIconLeft').textContent = '◀';
+    document.getElementById('tutLabelRight').textContent = 'RIGHT →';
+    document.getElementById('tutIconRight').textContent = '▶';
+  }
+}
+
+function tutShowCoach(msg) {
+  const b = document.getElementById('tutCoachBubble');
+  b.innerHTML = msg;
+  b.style.opacity = '1';
+}
+
+function tutHideCoach() {
+  document.getElementById('tutCoachBubble').style.opacity = '0';
+}
+
+function tutStartTimer() {
+  const DUR = 3500;
+  tutTimerStart = performance.now();
+  const bar = document.getElementById('tutTimerBar');
+  bar.className = 'timer-bar';
+  function tick(now) {
+    if (!tutAccepting) return;
+    const pct = Math.max(0, 1 - (now - tutTimerStart) / DUR);
+    bar.style.width = (pct * 100) + '%';
+    bar.className = 'timer-bar' + (pct < 0.28 ? ' danger' : '');
+    if (pct <= 0) {
+      tutAccepting = false;
+      tutShowToast('⏰ 시간 초과! 다시!', 'timeout');
+      sfxTimeout();
+      document.getElementById('tutArrowCard').className = 'arrow-card ac-wrong';
+      setTimeout(() => tutStartRound(), 1200);
+      return;
+    }
+    tutRaf = requestAnimationFrame(tick);
+  }
+  tutRaf = requestAnimationFrame(tick);
+}
+
+function tutStartRedTimer() {
+  tutTimerStart = performance.now();
+  const bar = document.getElementById('tutTimerBar');
+  bar.className = 'timer-bar danger';
+  const rn = document.getElementById('tutRedNum');
+  function tick(now) {
+    if (!tutAccepting) return;
+    const pct = Math.max(0, 1 - (now - tutTimerStart) / TUT_RED_MS);
+    bar.style.width = (pct * 100) + '%';
+    if (rn) rn.textContent = Math.ceil(pct * (TUT_RED_MS / 1000)) + 's';
+    if (pct <= 0) {
+      tutAccepting = false;
+      tutCorrectTotal++;
+      document.getElementById('tutCorrectCount').textContent = tutCorrectTotal;
+      document.getElementById('tutArrowCard').className = 'arrow-card ac-skip';
+      tutShowToast('✅ 잘 버텼어요!', 'skip');
+      sfxRedSkip();
+      tutRound++;
+      setTimeout(() => tutCheckStepDone(), 1000);
+      return;
+    }
+    tutRaf = requestAnimationFrame(tick);
+  }
+  tutRaf = requestAnimationFrame(tick);
+}
+
+function stopTutTimer() {
+  if (tutRaf) { cancelAnimationFrame(tutRaf); tutRaf = null; }
+  const bar = document.getElementById('tutTimerBar');
+  if (bar) bar.style.width = '0%';
+}
+
+function onTutPanelClick(side, e) {
+  if (!tutAccepting || !tutPat) return;
+  resumeAC();
+
+  // RED = instant fail if clicked
+  if (tutPat === 'red') {
+    stopTutTimer(); tutAccepting = false;
+    const panel = document.getElementById(side === 'left' ? 'tutPanelLeft' : 'tutPanelRight');
+    panel.classList.add('miss');
+    document.getElementById('tutArrowCard').className = 'arrow-card ac-wrong';
+    tutShowToast('❌ 눌러버렸어요! 아무것도 누르면 안 돼요!', 'bad');
+    sfxWrong();
+    setTimeout(() => { panel.classList.remove('miss'); tutStartRound(); }, 1400);
+    return;
+  }
+
+  // Same as main game: physical DOM click side = label side, no remap needed
+  const logicalSide = side;
+
+  // Check correctness
+  const dirOk = tutPat === 'blue' ? (logicalSide !== tutDir) : (logicalSide === tutDir);
+
+  if (!dirOk) {
+    stopTutTimer(); tutAccepting = false;
+    const panel = document.getElementById(side === 'left' ? 'tutPanelLeft' : 'tutPanelRight');
+    panel.classList.add('miss');
+    document.getElementById('tutArrowCard').className = 'arrow-card ac-wrong';
+    sfxWrong();
+
+    // Give targeted hint
+    let hint = '❌ 방향이 틀렸어요! 다시 해보세요';
+    if (tutPat === 'blue') hint = '❌ 파란색 = 반대 방향! ↔';
+    if (tutPat === 'orange') hint = '❌ 화살표와 같은 라벨을 누르세요!';
+    if (tutPat === 'green') hint = '❌ 화살표 방향과 같은 쪽을 누르세요!';
+    tutShowToast(hint, 'bad');
+
+    setTimeout(() => { panel.classList.remove('miss'); tutStartRound(); }, 1400);
+    return;
+  }
+
+  // Correct tap
+  tutTapCount++;
+  sfxTapOk();
+  const panel = document.getElementById(side === 'left' ? 'tutPanelLeft' : 'tutPanelRight');
+  panel.classList.add('hit');
+  setTimeout(() => panel.classList.remove('hit'), 160);
+
+  if (tutTapCount < tutTapNeeded) {
+    tutShowToast('(' + tutTapCount + '/' + tutTapNeeded + ') 계속!', 'ok');
+    return;
+  }
+
+  // All taps done = round complete
+  stopTutTimer(); tutAccepting = false;
+  tutCorrectTotal++;
+  document.getElementById('tutCorrectCount').textContent = tutCorrectTotal;
+
+  const correctSide = tutPat === 'blue' ? (tutDir === 'left' ? 'right' : 'left') : tutDir;
+  document.getElementById('tutArrowCard').className = 'arrow-card ac-correct-' + correctSide;
+  tutShowToast('✅ 정확해요!', 'ok');
+  sfxCorrect();
+
+  tutRound++;
+  setTimeout(() => tutCheckStepDone(), 900);
+}
+
+function tutCheckStepDone() {
+  const step = TUT_STEPS[tutStep];
+  if (tutRound < step.rounds) {
+    tutStartRound();
+    return;
+  }
+  // Step complete!
+  tutHideCoach();
+  stopTutTimer();
+  tutAccepting = false;
+  tutStep++;
+
+  // Update HUD progress immediately
+  document.getElementById('tutProgressLabel').textContent = tutStep + ' / ' + TUT_STEPS.length;
+  if (tutStep < TUT_STEPS.length) {
+    document.getElementById('tutStepLabel').textContent = TUT_STEPS[tutStep].colorName;
+  }
+
+  const overlay = document.getElementById('tutStepComplete');
+  overlay.style.display = 'flex';
+  document.getElementById('tutStepCompleteIcon').textContent = '✅';
+
+  if (tutStep >= TUT_STEPS.length) {
+    // All done
+    document.getElementById('tutStepCompleteTitle').innerHTML = '<span style="color:#f1f5f9">모든 패턴 완료!</span>';
+    document.getElementById('tutStepCompleteDesc').textContent = '튜토리얼을 전부 마쳤어요! 실전을 시작할 준비가 됐어요.';
+    document.getElementById('tutNextBtn').textContent = '🎉 결과 보기';
+  } else {
+    const prev = TUT_STEPS[tutStep - 1];
+    document.getElementById('tutStepCompleteTitle').innerHTML = prev.complete;
+    document.getElementById('tutStepCompleteDesc').textContent = prev.completeSub;
+    const next = TUT_STEPS[tutStep];
+    // Next button: show colorName with color
+    let nextColorHtml;
+    if (next.layoutColor && next.patColor !== next.layoutColor) {
+      const parts = next.colorName.split(' + ');
+      nextColorHtml = `<span style="color:${next.layoutColor}">${parts[0]}</span> + <span style="color:${next.patColor}">${parts[1]}</span>`;
+    } else {
+      nextColorHtml = `<span style="color:${next.patColor}">${next.colorName}</span>`;
+    }
+    document.getElementById('tutNextBtn').innerHTML = '다음: ' + nextColorHtml + ' →';
+  }
+  sfxLevelUp();
+}
+
+function tutShowToast(msg, cls) {
+  const t = document.getElementById('tutToast');
+  t.textContent = msg; t.className = 'toast show ' + cls;
+  clearTimeout(t._tid);
+  t._tid = setTimeout(() => { t.className = 'toast'; }, 1200);
+}
+
+function exitTutorial() {
+  stopTutTimer();
+  tutAccepting = false;
+  tutPat = null;
+  show('tutPickerScreen');
+}
+
+/* ════════════════════════════════
+   AUTH / UI HELPERS
+════════════════════════════════ */
+function toggleUserMenu() {
+  const m = document.getElementById('userMenu');
+  m.style.display = m.style.display === 'block' ? 'none' : 'block';
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('#userInfo')) {
+    const m = document.getElementById('userMenu');
+    if (m) m.style.display = 'none';
+  }
+});
+
+function openNicknameModal() {
+  const modal = document.getElementById('nicknameModal');
+  modal.style.display = 'flex';
+  document.getElementById('nicknameInput').value = '';
+  document.getElementById('nicknameInput').focus();
+}
+
+/* ════════════════════════════════
+   MAIN TAB SWITCH
+════════════════════════════════ */
+let currentMainTab = 'play';
+function switchMainTab(tab) {
+  currentMainTab = tab;
+  ['play','ranking','achieve'].forEach(t => {
+    document.getElementById(t === 'play' ? 'playPane' : t + 'Pane').style.display = 'none';
+    document.getElementById('tab' + t.charAt(0).toUpperCase() + t.slice(1)).classList.remove('active');
+  });
+  document.getElementById(tab === 'play' ? 'playPane' : tab + 'Pane').style.display = 'flex';
+  document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.add('active');
+
+  if (tab === 'ranking') loadRankingUI('score');
+  if (tab === 'achieve') loadAchieveUI();
+}
+
+/* ════════════════════════════════
+   RANKING UI
+════════════════════════════════ */
+let currentRankTab = 'score';
+async function switchRankTab(type) {
+  currentRankTab = type;
+  document.getElementById('rankTabScore').classList.toggle('active', type === 'score');
+  document.getElementById('rankTabWave').classList.toggle('active', type === 'wave');
+  loadRankingUI(type);
+}
+
+async function loadRankingUI(type) {
+  const list = document.getElementById('rankList');
+  list.innerHTML = '<div class="rank-loading">불러오는 중...</div>';
+  try {
+    const rows = await window.loadRanking(type);
+    if (!rows.length) { list.innerHTML = '<div class="rank-loading">기록이 없어요</div>'; return; }
+    list.innerHTML = '';
+    const meUid = window._currentUid || '';
+    rows.forEach((row, i) => {
+      const div = document.createElement('div');
+      div.className = 'rank-row' + (row.uid === meUid ? ' rank-me' : '');
+      const numCls = i === 0 ? 'top1' : i === 1 ? 'top2' : i === 2 ? 'top3' : '';
+      const numLabel = i < 3 ? ['🥇','🥈','🥉'][i] : (i + 1);
+      const mainVal  = type === 'score' ? row.score.toLocaleString() : `Wave ${row.wave}`;
+      const subVal   = type === 'score' ? `Wave ${row.wave} · 정확도 ${row.acc}%` : `${row.score.toLocaleString()}점 · 정확도 ${row.acc}%`;
+      div.innerHTML = `
+        <div class="rank-num ${numCls}">${numLabel}</div>
+        <img class="rank-avatar" src="${row.photoURL||''}" onerror="this.src=''" alt="">
+        <div class="rank-info">
+          <div class="rank-name">${escHtml(row.nickname||'익명')}</div>
+          <div class="rank-sub">${subVal}</div>
+        </div>
+        <div class="rank-val ${type === 'wave' ? 'wave-val' : ''}">${mainVal}</div>`;
+      list.appendChild(div);
+    });
+  } catch(e) {
+    list.innerHTML = '<div class="rank-loading">랭킹 불러오기 실패</div>';
+  }
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* ════════════════════════════════
+   ACHIEVEMENT UI
+════════════════════════════════ */
+async function loadAchieveUI() {
+  // 로그인 체크는 fbSaveBest 쪽에서 처리되므로 여기선 표시만
+  const badge    = document.getElementById('ach50kBadge');
+  const progress = document.getElementById('ach50kProgress');
+  if (!window._currentUid) {
+    badge.className = 'ach-badge ach-lock'; badge.textContent = '미달성';
+    progress.textContent = '로그인하면 진행 상황을 확인할 수 있어요';
+    return;
+  }
+  // best score 대비 진행률
+  const pct = Math.min(100, Math.round((window.bestScore || 0) / 50000 * 100));
+  if ((window.bestScore || 0) >= 50000) {
+    badge.className = 'ach-badge ach-done'; badge.textContent = '달성! ✅';
+    progress.textContent = `달성 점수: ${window.bestScore.toLocaleString()}점`;
+  } else {
+    badge.className = 'ach-badge ach-lock'; badge.textContent = '미달성';
+    progress.textContent = `현재 최고: ${(window.bestScore||0).toLocaleString()}점 (${pct}%)`;
+  }
+}
+
+document.addEventListener('keydown', e => {
+  // Tutorial keyboard
+  if (tutAccepting && tutPat) {
+    const cx = window.innerWidth, cy = window.innerHeight * 0.5;
+    if (tutVertical) {
+      if (e.key === 'ArrowUp')   { resumeAC(); onTutPanelClick('left',  { clientX: cx*0.5, clientY: cy*0.3 }); }
+      if (e.key === 'ArrowDown') { resumeAC(); onTutPanelClick('right', { clientX: cx*0.5, clientY: cy*1.4 }); }
+    } else {
+      if (e.key === 'ArrowLeft')  { resumeAC(); onTutPanelClick('left',  { clientX: cx*0.25, clientY: cy }); }
+      if (e.key === 'ArrowRight') { resumeAC(); onTutPanelClick('right', { clientX: cx*0.75, clientY: cy }); }
+    }
+    return;
+  }
+  if (!accepting) return;
+  const cx = window.innerWidth, cy = window.innerHeight * 0.5;
+  if (panelVertical) {
+    if (e.key === 'ArrowUp')   { resumeAC(); onPanelClick('left',  { clientX: cx*0.5, clientY: cy*0.3 }); }
+    if (e.key === 'ArrowDown') { resumeAC(); onPanelClick('right', { clientX: cx*0.5, clientY: cy*1.4 }); }
+  } else {
+    if (e.key === 'ArrowLeft')  { resumeAC(); onPanelClick('left',  { clientX: cx*0.25, clientY: cy }); }
+    if (e.key === 'ArrowRight') { resumeAC(); onPanelClick('right', { clientX: cx*0.75, clientY: cy }); }
+  }
+});
+
+</script>
+</body>
+</html>
