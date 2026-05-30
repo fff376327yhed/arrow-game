@@ -2219,6 +2219,15 @@ async function loadRankingUI(type) {
   const list = document.getElementById('rankList');
   list.innerHTML = '<div class="rank-loading">불러오는 중...</div>';
   try {
+    // module 스크립트 로드 완료 대기 (최대 5초)
+    let waited = 0;
+    while (typeof window.loadRanking !== 'function' && waited < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+      waited += 100;
+    }
+    if (typeof window.loadRanking !== 'function') {
+      throw new Error('Firebase 초기화 실패 — 페이지를 새로고침 해주세요');
+    }
     const rows = await window.loadRanking(type);
     if (!rows.length) { list.innerHTML = '<div class="rank-loading">기록이 없어요</div>'; return; }
     list.innerHTML = '';
