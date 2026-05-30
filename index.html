@@ -243,25 +243,23 @@ window.fbSaveBest = async function(score, wave, acc, correct, attempts) {
   await sendToSheet({ uid, name: nick, achievement: 'coins_update', coins: score });
 
   // ── STEP 5: 해정뉴스 DB에 최고점 동기화 (도전과제 진행률용) ────
-  if (isNewScore) {
-    console.log('[5/5] 해정뉴스 DB arrowScores 동기화 중...');
-    try {
-      const HSJ_DB_URL = 'https://hsj-news-default-rtdb.firebaseio.com';
-      // 화살표 게임 Auth 토큰 획득
-      const token = await currentUser.getIdToken();
-      const googleUid = currentUser.providerData?.[0]?.uid || uid;
-      await fetch(
-        `${HSJ_DB_URL}/arrowScores/${encodeURIComponent(googleUid)}.json?auth=${token}`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ score: newScore, updatedAt: now })
-        }
-      );
-      console.log('[5/5] ✅ 해정뉴스 DB 동기화 완료');
-    } catch(e) {
-      console.warn('[5/5] ❌ 해정뉴스 DB 동기화 실패:', e.message);
-    }
+  // 신기록 여부 관계없이 항상 실행 — 최고점(newScore)을 저장
+  console.log('[5/5] 해정뉴스 DB arrowScores 동기화 중...');
+  try {
+    const HSJ_DB_URL = 'https://hsj-news-default-rtdb.firebaseio.com';
+    const token = await currentUser.getIdToken();
+    const googleUid = currentUser.providerData?.[0]?.uid || uid;
+    await fetch(
+      `${HSJ_DB_URL}/arrowScores/${encodeURIComponent(googleUid)}.json?auth=${token}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ score: newScore, updatedAt: now })
+      }
+    );
+    console.log(`[5/5] ✅ 해정뉴스 DB 동기화 완료 — score=${newScore}`);
+  } catch(e) {
+    console.warn('[5/5] ❌ 해정뉴스 DB 동기화 실패:', e.message);
   }
 
   console.log(`━━━ 저장 완료 ━━━`);
