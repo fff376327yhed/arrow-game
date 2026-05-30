@@ -9,7 +9,7 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
-import { getDatabase, ref, set, get, query, orderByChild, limitToLast }
+import { getDatabase, ref, set, get }
   from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
 
 const firebaseConfig = {
@@ -269,13 +269,27 @@ window.sendToSheet = sendToSheet;
 
 /* ── 랭킹 불러오기 ── */
 window.loadRanking = async function(type) {
-  const q = query(ref(db, `rankings/${type}`), orderByChild(type), limitToLast(50));
-  const snap = await get(q);
-  const rows = [];
-  snap.forEach(child => rows.push({ uid: child.key, ...child.val() }));
-  // 내림차순
-  rows.sort((a,b) => type === 'score' ? b.score - a.score : b.wave - a.wave);
-  return rows;
+  try {
+    console.log(`[랭킹] ${type} 랭킹 불러오는 중...`);
+    // orderByChild 대신 전체 데이터를 가져와 클라이언트에서 정렬
+    // (Firebase Rules에 .indexOn 없이도 동작)
+    const snap = await get(ref(db, `rankings/${type}`));
+    if (!snap.exists()) {
+      console.log(`[랭킹] ${type} 데이터 없음`);
+      return [];
+    }
+    const rows = [];
+    snap.forEach(child => rows.push({ uid: child.key, ...child.val() }));
+    // 내림차순 정렬
+    rows.sort((a,b) => type === 'score' ? b.score - a.score : b.wave - a.wave);
+    // 상위 50개만
+    const result = rows.slice(0, 50);
+    console.log(`[랭킹] ${type} ${result.length}명 로드 완료`);
+    return result;
+  } catch(e) {
+    console.error(`[랭킹] ${type} 불러오기 실패:`, e.message, e.code);
+    throw e;
+  }
 };
 </script>
 <style>
@@ -2227,7 +2241,8 @@ async function loadRankingUI(type) {
       list.appendChild(div);
     });
   } catch(e) {
-    list.innerHTML = '<div class="rank-loading">랭킹 불러오기 실패</div>';
+    console.error('[랭킹UI] 오류:', e.message);
+    list.innerHTML = `<div class="rank-loading">랭킹 불러오기 실패<br><span style="font-size:.65rem;color:#475569;">${e.message}</span></div>`;
   }
 }
 
