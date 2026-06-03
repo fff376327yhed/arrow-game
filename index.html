@@ -279,12 +279,16 @@ window.loadRanking = async function(type) {
       return [];
     }
     const rows = [];
-    snap.forEach(child => rows.push({ uid: child.key, ...child.val() }));
+    snap.forEach(child => {
+      const val = child.val();
+      if (val) rows.push({ uid: child.key, ...val }); // null 방어: 유효한 데이터만 추가
+    });
+    console.log(`[랭킹] ${type} 전체 ${rows.length}명 파싱 완료`);
     // 내림차순 정렬
     rows.sort((a,b) => type === 'score' ? b.score - a.score : b.wave - a.wave);
     // 상위 50개만
     const result = rows.slice(0, 50);
-    console.log(`[랭킹] ${type} ${result.length}명 로드 완료`);
+    console.log(`[랭킹] ${type} 최종 ${result.length}명 로드 완료`);
     return result;
   } catch(e) {
     console.error(`[랭킹] ${type} 불러오기 실패:`, e.message, e.code);
