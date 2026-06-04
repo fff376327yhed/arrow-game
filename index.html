@@ -2291,29 +2291,7 @@ async function loadAchieveUI() {
 ════════════════════════════════ */
 
 
-document.addEventListener('keydown', e => {
-  // Tutorial keyboard
-  if (tutAccepting && tutPat) {
-    const cx = window.innerWidth, cy = window.innerHeight * 0.5;
-    if (tutVertical) {
-      if (e.key === 'ArrowUp')   { resumeAC(); onTutPanelClick('left',  { clientX: cx*0.5, clientY: cy*0.3 }); }
-      if (e.key === 'ArrowDown') { resumeAC(); onTutPanelClick('right', { clientX: cx*0.5, clientY: cy*1.4 }); }
-    } else {
-      if (e.key === 'ArrowLeft')  { resumeAC(); onTutPanelClick('left',  { clientX: cx*0.25, clientY: cy }); }
-      if (e.key === 'ArrowRight') { resumeAC(); onTutPanelClick('right', { clientX: cx*0.75, clientY: cy }); }
-    }
-    return;
-  }
-  if (!accepting) return;
-  const cx = window.innerWidth, cy = window.innerHeight * 0.5;
-  if (panelVertical) {
-    if (e.key === 'ArrowUp')   { resumeAC(); onPanelClick('left',  { clientX: cx*0.5, clientY: cy*0.3 }); }
-    if (e.key === 'ArrowDown') { resumeAC(); onPanelClick('right', { clientX: cx*0.5, clientY: cy*1.4 }); }
-  } else {
-    if (e.key === 'ArrowLeft')  { resumeAC(); onPanelClick('left',  { clientX: cx*0.25, clientY: cy }); }
-    if (e.key === 'ArrowRight') { resumeAC(); onPanelClick('right', { clientX: cx*0.75, clientY: cy }); }
-  }
-});
+// 키보드 입력 비활성화 — 터치/클릭 전용
 
 </script>
 </body>
